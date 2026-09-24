@@ -70,6 +70,8 @@ if [[ "$(basename "$filename")" == bootstrap-$CODENAME*.tar.gz ]]; then
     BRANCH="$(get_tkl_ver_no "$CODENAME")"
 elif [[ "$filename" == "turnkey"*".iso" ]]; then
     BRANCH="$(sed -En 's|^[a-z0-9-]+-([0-9]+)\.[0-9].*|\1|p'<<<"$filename").x"
+elif [[ "$filename" == *.tar.zst ]]; then
+    BRANCH="$(get_tkl_ver_no "$CODENAME")"
 else
     fatal "Unexpected filename: $filename"
 fi
