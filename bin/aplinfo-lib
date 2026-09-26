@@ -1,0 +1,355 @@
+#!/bin/bash
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# Functions shared by bt-aplinfo and tests/aplinfo. Meant to be sourced.
+# Every function reads its inputs from its arguments, prints its result on
+# stdout and returns non-zero with a message on stderr instead of exiting, so
+# the caller decides what is fatal.
+#
+# The index format is the one pve-manager parses in PVE/APLInfo.pm
+# (read_aplinfo_from_fh): records separated by blank lines, "Key: value"
+# lines, a Description whose continuation lines start with whitespace. The
+# field order follows the records TurnKey publishes at
+# https://releases.turnkeylinux.org/pve/aplinfo.dat.
+
+APLINFO_OS=debian-13
+APLINFO_SECTION=keellinux
+APLINFO_TYPE=lxc
+APLINFO_PACKAGE_PREFIX=keel-
+APLINFO_MANAGE_URL="http://__IPADDRESS__/"
+APLINFO_INFOPAGE_BASE=${APLINFO_INFOPAGE_BASE:-https://keellinux.org}
+APLINFO_DEFAULT_URL=https://releases.keellinux.org/pve/
+APLINFO_FILE=aplinfo.dat
+
+# The extensions PVE::Storage::VZTMPL_EXT_RE_1 accepts for a template
+# (pve-storage src/PVE/Storage.pm), which PVE::APLInfo applies to Location.
+APLINFO_TEMPLATE_EXT="tar.zst tar.gz tar.xz tar.bz2 tar"
+APLINFO_DEFAULT_EXT=tar.zst
+
+# Fields in the order they are written; pveam requires the ones marked in
+# aplinfo_record_validate.
+APLINFO_FIELDS="Package Version Type OS Section Architecture Location Infopage ManageUrl sha512sum Description"
+
+aplinfo_error() {
+    echo "ERROR [aplinfo-lib]: $*" 1>&2
+    return 1
+}
+
+# Template file name: <os>-<package>_<version>_<arch>.<ext>, the shape
+# PVE::APLInfo builds itself when a record has no Location.
+aplinfo_template_name() {
+    local app=$1
+    local version=$2
+    local arch=$3
+    local ext=${4:-$APLINFO_DEFAULT_EXT}
+    if ! aplinfo_ext_known "$ext"; then
+        aplinfo_error "unknown template extension '$ext' (one of: $APLINFO_TEMPLATE_EXT)"
+        return 1
+    fi
+    echo "$APLINFO_OS-$APLINFO_PACKAGE_PREFIX${app}_${version}_$arch.$ext"
+}
+
+# Prints the template extension of a file name, or fails.
+aplinfo_name_ext() {
+    local name=$1
+    local ext
+    for ext in $APLINFO_TEMPLATE_EXT; do
+        if [[ "$name" == *.$ext ]]; then
+            echo "$ext"
+            return 0
+        fi
+    done
+    return 1
+}
+
+aplinfo_ext_known() {
+    local ext=$1
+    local known
+    for known in $APLINFO_TEMPLATE_EXT; do
+        [[ "$known" != "$ext" ]] || return 0
+    done
+    return 1
+}
+
+# Prints "os app version arch ext" for a template path, or fails when the
+# name does not follow the convention.
+aplinfo_parse_template_name() {
+    local name
+    name=$(basename "$1")
+    local re='^(debian-[0-9]+)-'"$APLINFO_PACKAGE_PREFIX"'([a-z0-9][a-z0-9-]*)_([0-9][A-Za-z0-9.+:~]*-[0-9]+)_([a-z0-9]+)\.(tar\.(gz|xz|zst|bz2)|tar)$'
+    if [[ ! "$name" =~ $re ]]; then
+        aplinfo_error "template name '$name' is not ${APLINFO_OS}-${APLINFO_PACKAGE_PREFIX}<app>_<version>-<revision>_<arch>.<ext>"
+        return 1
+    fi
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]} ${BASH_REMATCH[5]}"
+}
+
+# Joins the base URL and the template file name with exactly one slash.
+aplinfo_location() {
+    local base=$1
+    local name=$2
+    if [[ ! "$base" =~ ^https?:// ]]; then
+        aplinfo_error "base URL must start with http:// or https://, got '$base'"
+        return 1
+    fi
+    echo "${base%/}/$name"
+}
+
+# sha512 of a template. When a .sha512 file written by keel assemble sits
+# next to it, the digest must agree with it, so a stale sidecar is caught.
+aplinfo_sha512() {
+    local file=$1
+    local digest recorded
+    if [[ ! -f "$file" ]]; then
+        aplinfo_error "template not found: $file"
+        return 1
+    fi
+    digest=$(sha512sum "$file" | cut -d ' ' -f 1)
+    if [[ -f "$file.sha512" ]]; then
+        recorded=$(cut -d ' ' -f 1 "$file.sha512")
+        if [[ "$recorded" != "$digest" ]]; then
+            aplinfo_error "$file.sha512 does not match the template (stale sidecar?)"
+            return 1
+        fi
+    fi
+    echo "$digest"
+}
+
+# The product directory of an appliance: <products>/<app> as tkldev-setup
+# clones it, or <products>/keel-<app> as the repository is named.
+aplinfo_product_dir() {
+    local products=$1
+    local app=$2
+    local dir
+    for dir in "$products/$app" "$products/$APLINFO_PACKAGE_PREFIX$app"; do
+        if [[ -d "$dir" ]]; then
+            echo "$dir"
+            return 0
+        fi
+    done
+    aplinfo_error "no product directory for '$app' under $products"
+    return 1
+}
+
+# Version of the newest changelog entry: "name-<ver> (<rev>) ..." gives
+# "<ver>-<rev>", the shape pveam parses.
+aplinfo_changelog_version() {
+    local changelog=$1
+    local first
+    if [[ ! -f "$changelog" ]]; then
+        aplinfo_error "changelog not found: $changelog"
+        return 1
+    fi
+    first=$(head -n 1 "$changelog")
+    if [[ ! "$first" =~ ^[a-z0-9-]+-([0-9][A-Za-z0-9.+:~]*)\ \(([0-9]+)\) ]]; then
+        aplinfo_error "cannot read a version from the first line of $changelog: '$first'"
+        return 1
+    fi
+    echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+}
+
+# Two lines: the headline (the Description value) and its continuation.
+# Source, in order: a pve-description file (first line headline, the rest
+# joined into the continuation) or the title line of README.rst ("Keel Core -
+# Debian with batteries included": the part before " - " is the headline).
+aplinfo_description() {
+    local product_dir=$1
+    local headline long
+    if [[ -f "$product_dir/pve-description" ]]; then
+        headline=$(head -n 1 "$product_dir/pve-description")
+        long=$(tail -n +2 "$product_dir/pve-description" | tr -s '\n' ' ' | sed 's/^ //; s/ $//')
+        [[ -n "$long" ]] || long=$headline
+    elif [[ -f "$product_dir/README.rst" ]]; then
+        long=$(head -n 1 "$product_dir/README.rst" | sed 's/[[:space:]]*$//')
+        headline=${long%% - *}
+    else
+        aplinfo_error "neither pve-description nor README.rst in $product_dir"
+        return 1
+    fi
+    if [[ -z "$headline" ]]; then
+        aplinfo_error "empty description in $product_dir"
+        return 1
+    fi
+    printf '%s\n%s\n' "$headline" "$long"
+}
+
+# One record, TurnKey field order. Arguments: app version os arch location
+# sha512 headline continuation.
+aplinfo_record_render() {
+    if [[ $# -ne 8 ]]; then
+        aplinfo_error "record_render takes 8 arguments, got $#"
+        return 1
+    fi
+    local app=$1 version=$2 os=$3 arch=$4 location=$5 sha512=$6 headline=$7 long=$8
+    cat <<EOF
+Package: $APLINFO_PACKAGE_PREFIX$app
+Version: $version
+Type: $APLINFO_TYPE
+OS: $os
+Section: $APLINFO_SECTION
+Architecture: $arch
+Location: $location
+Infopage: ${APLINFO_INFOPAGE_BASE%/}/$app
+ManageUrl: $APLINFO_MANAGE_URL
+sha512sum: $sha512
+Description: $headline
+ $long
+EOF
+}
+
+aplinfo_record_field() {
+    local record=$1
+    local key=$2
+    sed -n "s/^$key: *//p" "$record" | head -n 1
+}
+
+# Checks one record file the way pveam will read it: every field present,
+# Type lxc, Version in pveam's shape, a 128 hex sha512sum, a Location with an
+# accepted template extension, a non-empty Description with one continuation
+# line, no blank line inside (a blank line would split the record).
+aplinfo_record_validate() {
+    local record=$1
+    local field value ext
+    if [[ ! -f "$record" ]]; then
+        aplinfo_error "record not found: $record"
+        return 1
+    fi
+    if grep -q '^[[:space:]]*$' "$record"; then
+        aplinfo_error "$record: blank line inside the record"
+        return 1
+    fi
+    for field in $APLINFO_FIELDS; do
+        value=$(aplinfo_record_field "$record" "$field")
+        if [[ -z "$value" ]]; then
+            aplinfo_error "$record: field '$field' missing or empty"
+            return 1
+        fi
+    done
+    value=$(aplinfo_record_field "$record" Type)
+    if [[ "$value" != lxc ]]; then
+        aplinfo_error "$record: Type must be lxc, got '$value'"
+        return 1
+    fi
+    value=$(aplinfo_record_field "$record" Version)
+    if [[ ! "$value" =~ ^[0-9][A-Za-z0-9.+:~-]*-[0-9]+$ ]]; then
+        aplinfo_error "$record: Version '$value' is not <ver>-<rev>"
+        return 1
+    fi
+    value=$(aplinfo_record_field "$record" sha512sum)
+    if [[ ! "$value" =~ ^[0-9a-f]{128}$ ]]; then
+        aplinfo_error "$record: sha512sum must be 128 hex characters"
+        return 1
+    fi
+    value=$(aplinfo_record_field "$record" Location)
+    if ! aplinfo_name_ext "$(basename "$value")" >/dev/null; then
+        aplinfo_error "$record: Location '$value' has no accepted template extension ($APLINFO_TEMPLATE_EXT)"
+        return 1
+    fi
+    if ! grep -q '^ [^[:space:]]' "$record"; then
+        aplinfo_error "$record: Description has no continuation line"
+        return 1
+    fi
+    return 0
+}
+
+# Writes the index on stdout: the record files in the order given,
+# separated by one blank line.
+aplinfo_assemble() {
+    local record first=yes
+    if [[ $# -eq 0 ]]; then
+        aplinfo_error "assemble needs at least one record"
+        return 1
+    fi
+    for record in "$@"; do
+        aplinfo_record_validate "$record" || return 1
+        [[ -n "$first" ]] || echo
+        first=
+        cat "$record"
+    done
+}
+
+# aplinfo.dat.gz without name or timestamp, so the same index gives the same
+# bytes (pveam fetches <file>.gz and gunzips it).
+aplinfo_gzip() {
+    local file=$1
+    if [[ ! -f "$file" ]]; then
+        aplinfo_error "cannot gzip, file not found: $file"
+        return 1
+    fi
+    gzip -n -9 -c "$file" > "$file.gz"
+}
+
+# Detached armored signature <file>.asc over the uncompressed index, which
+# is what pveam verifies with sqv. Without a key id nothing is signed, a
+# stale .asc is removed and the caller is told on stdout.
+aplinfo_sign() {
+    local file=$1
+    local key=$2
+    if [[ ! -f "$file" ]]; then
+        aplinfo_error "cannot sign, file not found: $file"
+        return 1
+    fi
+    if [[ -z "$key" ]]; then
+        rm -f "$file.asc"
+        echo "WARNING [aplinfo-lib]: BT_GPGKEY not set, $file.asc not written; pveam refuses an index without a signature"
+        return 0
+    fi
+    if ! gpg --batch --yes --local-user "$key" --armor --detach-sign \
+            --output "$file.asc" "$file"; then
+        aplinfo_error "gpg failed to sign $file with key $key"
+        return 1
+    fi
+    echo "$file.asc"
+}
+
+aplinfo_parse_args() {
+    APLINFO_URL=$APLINFO_DEFAULT_URL
+    APLINFO_OUTPUT=
+    APLINFO_TEMPLATES=()
+    APLINFO_HELP=
+    APLINFO_ERROR=
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --help|-h)
+                APLINFO_HELP=yes
+                return 0
+                ;;
+            --url|-u)
+                if [[ -z "$2" ]]; then
+                    APLINFO_ERROR="$1 needs a base URL"
+                    return 1
+                fi
+                APLINFO_URL=$2
+                shift
+                ;;
+            --output|-o)
+                if [[ -z "$2" ]]; then
+                    APLINFO_ERROR="$1 needs a directory"
+                    return 1
+                fi
+                APLINFO_OUTPUT=$2
+                shift
+                ;;
+            -*)
+                APLINFO_ERROR="unrecognized option: $1"
+                return 1
+                ;;
+            *)
+                APLINFO_TEMPLATES+=("$1")
+                ;;
+        esac
+        shift
+    done
+    if [[ ${#APLINFO_TEMPLATES[@]} -eq 0 ]]; then
+        APLINFO_ERROR="must give at least one template"
+        return 1
+    fi
+    return 0
+}
