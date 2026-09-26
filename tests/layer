@@ -52,6 +52,12 @@ expect_fail() {
     fi
 }
 
+expect_ok() {
+    local label=$1
+    shift
+    "$@" >/dev/null 2>&1 || fatal "$label: should have passed"
+}
+
 assert_eq() {
     local label=$1
     local got=$2
@@ -278,7 +284,7 @@ for bad in "" "a b" "--bogus a" "a --parent" "a --parent a"; do
 done
 
 info "16: bt-layer setup (scratch copy with stubs)"
-sbt=$tmp/bt
+sbt=$tmp/scratch-bt
 mkdir -p "$sbt/bin" "$sbt/config" "$tmp/stubs" "$tmp/guard" "$tmp/fab/common/conf" "$tmp/builds"
 cp "$BT/bt-layer" "$sbt/bt-layer"
 cp "$BT/bin/layer-lib" "$sbt/bin/layer-lib"

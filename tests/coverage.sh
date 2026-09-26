@@ -2,6 +2,7 @@
 # Line coverage of the project-authored shell code, measured with kcov:
 #   bin/layer-lib and bt-layer under tests/layer
 #   bin/aplinfo-lib and bt-aplinfo under tests/aplinfo
+#   bin/signature-lib and bin/generate-signature under tests/signature
 # Exits 1 when a measured file is below the threshold (default 95), 2 when a
 # tool is missing.
 #
@@ -13,7 +14,9 @@
 # The tests run the bt-* scripts from a scratch copy (they need their own
 # config directory), so kcov lists the copy next to the checkout: the two
 # files are matched by name and, per name, the executed copy is the one
-# measured.
+# measured. tests/layer also puts a two line stub where bt-layer expects
+# generate-signature; that copy is excluded by its scratch path, since
+# measuring it would hide the real script behind the stub's 100 percent.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,9 +30,10 @@ for tool in kcov zstd git gpg; do
 done
 
 report="${COVERAGE_DIR:-$(mktemp -d)}"
-measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo
-for suite in layer aplinfo; do
-    kcov --include-pattern="$measured" --exclude-pattern=/tests/ \
+measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo,/bin/signature-lib,/bin/generate-signature
+skipped=/tests/,/scratch-bt/bin/generate-signature
+for suite in layer aplinfo signature; do
+    kcov --include-pattern="$measured" --exclude-pattern="$skipped" \
         "$report" "$here/$suite"
 done
 

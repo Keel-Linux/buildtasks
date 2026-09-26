@@ -39,11 +39,10 @@ installed:
 
 ## Not measured
 
-`tests/appname-version` and `tests/signature` exercise the inherited
-`bin/appname-version` and `generate-signature` scripts by hand and are not
-run under kcov; the other `bt-*` scripts (about 40 shell files) have no
-test. They follow the 0004 treatment when the project touches them, and the
-repository total is remeasured then.
+`tests/appname-version` exercises the inherited `bin/appname-version` by hand
+and is not run under kcov; the other `bt-*` scripts (about 40 shell files)
+have no test. They follow the 0004 treatment when the project touches them,
+and the repository total is remeasured then.
 
 ## 2026-09-26: the build audit
 
@@ -51,3 +50,23 @@ repository total is remeasured then.
 layer that carries an unconfigured or half-installed package, and `bt-layer`
 now treats a non-zero `make` as fatal instead of relying on the stamp alone.
 Both are covered by `tests/layer` (audit clean and audit unconfigured).
+
+## 2026-09-26: the signing identity
+
+`bin/generate-signature` no longer hardcodes TurnKey's release key. Its logic
+moved into `bin/signature-lib` under the 0004 split and `tests/signature`,
+rewritten with throwaway keys generated inside the test, is the third suite
+`tests/coverage.sh` runs:
+
+| File | Lines covered | Cover |
+|------|---------------|-------|
+| bin/layer-lib | 195 of 196 | 99 percent |
+| bt-layer | 101 of 102 | 99 percent |
+| bin/aplinfo-lib | 186 of 186 | 100 percent |
+| bt-aplinfo | 47 of 47 | 100 percent |
+| bin/signature-lib | 76 of 76 | 100 percent |
+| bin/generate-signature | 87 of 87 | 100 percent |
+
+The gate stays at 99. The stub `tests/layer` puts where `bt-layer` expects
+`generate-signature` is excluded by its scratch path, so the stub's 100
+percent cannot stand in for the real script's number.
