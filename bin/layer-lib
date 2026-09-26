@@ -1,0 +1,326 @@
+#!/bin/bash
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# Functions shared by bt-layer and tests/layer. Meant to be sourced. Every
+# function reads its inputs from its arguments (SOURCE_DATE_EPOCH is the one
+# environment variable consulted), prints its result on stdout and returns
+# non-zero with a message on stderr instead of exiting, so the caller decides
+# what is fatal.
+
+# Common conf scripts that are driven by per-product variables and are safe
+# to run again in a child layer.
+LAYER_RERUN_CONF="apache-credit php"
+
+# Common overlays that removelists-final/turnkey strips from every finished
+# layer and that the conf scripts of a child layer need again.
+LAYER_CHILD_OVERLAYS="turnkey.d/tkl-bashlib turnkey.d/systemd-chroot"
+
+# Conf script that writes /tmp/ZZ_SSL_CIPHERS for the webserver conf scripts.
+LAYER_SSL_CIPHERS_CONF="turnkey.d/zz-ssl-ciphers"
+LAYER_SSL_CIPHERS_MARK="ZZ_SSL_CIPHERS"
+
+# Paths left out of every layer tarball: the apt package cache and the apt
+# binary caches are rebuilt by apt and fab already deletes them at the end of
+# root.patched, which leaves only whiteouts behind.
+LAYER_TAR_EXCLUDES="./var/cache/apt/archives/* ./var/cache/apt/*.bin"
+
+# Submounts fab-chroot may leave behind under root.patched, deepest first.
+LAYER_SUBMOUNTS="run dev/pts dev proc sys"
+
+LAYER_ZSTD_LEVEL=19
+
+layer_error() {
+    echo "ERROR [layer-lib]: $*" 1>&2
+    return 1
+}
+
+layer_kind() {
+    local parent=$1
+    if [[ -z "$parent" ]]; then
+        echo rootfs
+    else
+        echo delta
+    fi
+}
+
+layer_altstrap_path() {
+    local fab_path=$1
+    local codename=$2
+    local arch=$3
+    echo "$fab_path/altstraps/$codename-$arch.core"
+}
+
+layer_epoch() {
+    local product_dir=$1
+    local epoch=$SOURCE_DATE_EPOCH
+    if [[ -z "$epoch" ]]; then
+        epoch=$(git -C "$product_dir" log -1 --format=%ct 2>/dev/null) || epoch=
+        if [[ -z "$epoch" ]]; then
+            layer_error "SOURCE_DATE_EPOCH not set and no git history in $product_dir"
+            return 1
+        fi
+    fi
+    if [[ ! "$epoch" =~ ^[0-9]+$ ]]; then
+        layer_error "SOURCE_DATE_EPOCH must be an integer, got '$epoch'"
+        return 1
+    fi
+    echo "$epoch"
+}
+
+layer_git_commit() {
+    local dir=$1
+    git -C "$dir" rev-parse HEAD 2>/dev/null || echo none
+}
+
+layer_make_var() {
+    local product_dir=$1
+    local var=$2
+    local out
+    out=$(cd "$product_dir" && make debug V="$var" 2>&1 >/dev/null) || {
+        layer_error "make debug V=$var failed in $product_dir"
+        return 1
+    }
+    sed -n "s|^.*: $var = ||p" <<<"$out" | head -n 1 \
+        | tr -s ' \t' ' ' | sed 's/^ //; s/ $//'
+}
+
+layer_words_has() {
+    local list=$1
+    local wanted=$2
+    local word
+    for word in $list; do
+        [[ "$word" != "$wanted" ]] || return 0
+    done
+    return 1
+}
+
+layer_words_minus() {
+    local list=$1
+    local remove=$2
+    local out=()
+    local word
+    for word in $list; do
+        layer_words_has "$remove" "$word" || out+=("$word")
+    done
+    echo "${out[*]}"
+}
+
+layer_child_conf() {
+    local full=$1
+    local parent=$2
+    local conf_path=$3
+    local child out=() conf
+    child=$(layer_words_minus "$full" "$parent")
+    if layer_words_has "$full" turnkey.d; then
+        out+=(turnkey.d/hostname)
+        for conf in $child; do
+            if grep -qs "$LAYER_SSL_CIPHERS_MARK" "$conf_path/$conf"; then
+                out+=("$LAYER_SSL_CIPHERS_CONF")
+                break
+            fi
+        done
+    fi
+    for conf in $child; do
+        out+=("$conf")
+    done
+    for conf in $LAYER_RERUN_CONF; do
+        if layer_words_has "$full" "$conf" && ! layer_words_has "$child" "$conf"; then
+            out+=("$conf")
+        fi
+    done
+    echo "${out[*]}"
+}
+
+layer_child_overlays() {
+    local full=$1
+    local parent=$2
+    local child
+    child=$(layer_words_minus "$full" "$parent")
+    echo "$LAYER_CHILD_OVERLAYS $child" | sed 's/ $//'
+}
+
+layer_manifest_render() {
+    local key value
+    if [[ $(( $# % 2 )) -ne 0 ]]; then
+        layer_error "manifest fields must come in key value pairs"
+        return 1
+    fi
+    while [[ $# -gt 0 ]]; do
+        key=$1
+        value=$2
+        shift 2
+        if [[ ! "$key" =~ ^[a-z][a-z0-9_]*$ ]]; then
+            layer_error "invalid manifest key '$key'"
+            return 1
+        fi
+        echo "$key $value"
+    done
+}
+
+layer_manifest_get() {
+    local manifest=$1
+    local key=$2
+    local value
+    if [[ ! -f "$manifest" ]]; then
+        layer_error "manifest not found: $manifest"
+        return 1
+    fi
+    value=$(sed -n "s|^$key ||p" "$manifest" | head -n 1)
+    if [[ -z "$value" ]]; then
+        layer_error "field '$key' missing in $manifest"
+        return 1
+    fi
+    echo "$value"
+}
+
+layer_tar_flags() {
+    local epoch=$1
+    local pattern
+    echo "--sort=name"
+    echo "--mtime=@$epoch"
+    echo "--numeric-owner"
+    echo "--format=posix"
+    echo "--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime"
+    echo "--xattrs"
+    echo "--xattrs-include=trusted.overlay.*"
+    echo "--xattrs-include=security.capability"
+    echo "--warning=no-file-ignored"
+    for pattern in $LAYER_TAR_EXCLUDES; do
+        echo "--exclude=$pattern"
+    done
+}
+
+layer_tar_members() {
+    local kind=$1
+    local build_dir=$2
+    case $kind in
+        rootfs)
+            printf '%s\n' -C "$build_dir/root.patched" .
+            ;;
+        delta)
+            printf '%s\n' -C "$build_dir/.deck/root.build/upper" .
+            printf '%s\n' -C "$build_dir/.deck/root.patched/upper" .
+            ;;
+        *)
+            layer_error "unknown layer kind '$kind'"
+            return 1
+            ;;
+    esac
+}
+
+layer_check_build() {
+    local kind=$1
+    local build_dir=$2
+    local dir
+    if [[ ! -f "$build_dir/stamps/root.patched" ]]; then
+        layer_error "$build_dir/stamps/root.patched missing - build failed or not run"
+        return 1
+    fi
+    if [[ ! -x "$build_dir/root.patched/bin/bash" ]]; then
+        layer_error "$build_dir/root.patched is not a rootfs - is the deck mounted? (make redeck)"
+        return 1
+    fi
+    if [[ "$kind" == delta ]]; then
+        for dir in root.build root.patched; do
+            if [[ ! -d "$build_dir/.deck/$dir/upper" ]]; then
+                layer_error "$build_dir/.deck/$dir/upper missing - not a deck build"
+                return 1
+            fi
+        done
+    fi
+    return 0
+}
+
+layer_hash_size() {
+    local file=$1
+    if [[ ! -f "$file" ]]; then
+        layer_error "file not found: $file"
+        return 1
+    fi
+    echo "$(sha256sum "$file" | cut -d ' ' -f 1) $(stat -c %s "$file")"
+}
+
+layer_write_sha256() {
+    local file=$1
+    local sha256
+    sha256=$(layer_hash_size "$file" | cut -d ' ' -f 1) || return 1
+    echo "$sha256  $(basename "$file")" > "$file.sha256"
+}
+
+layer_umount_targets() {
+    local root=$1
+    local sub
+    for sub in $LAYER_SUBMOUNTS; do
+        if mountpoint -q "$root/$sub"; then
+            echo "$root/$sub"
+        fi
+    done
+    return 0
+}
+
+layer_parent_resolve() {
+    local layers_dir=$1
+    local parent=$2
+    local rootfs=$layers_dir/$parent.rootfs
+    local manifest=$layers_dir/$parent.manifest
+    if [[ ! -x "$rootfs/bin/bash" ]]; then
+        layer_error "parent rootfs not found: $rootfs (build the parent first)"
+        return 1
+    fi
+    layer_manifest_get "$manifest" sha256
+}
+
+layer_parse_args() {
+    LAYER_NAME=
+    LAYER_PARENT=
+    LAYER_USE_EXISTING=
+    LAYER_HELP=
+    LAYER_ERROR=
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --help|-h)
+                LAYER_HELP=yes
+                return 0
+                ;;
+            --parent|-p)
+                if [[ -z "$2" ]]; then
+                    LAYER_ERROR="$1 needs a layer name"
+                    return 1
+                fi
+                LAYER_PARENT=$2
+                shift
+                ;;
+            --use-existing|-u)
+                LAYER_USE_EXISTING=yes
+                ;;
+            -*)
+                LAYER_ERROR="unrecognized option: $1"
+                return 1
+                ;;
+            *)
+                if [[ -n "$LAYER_NAME" ]]; then
+                    LAYER_ERROR="accepts only one layer name"
+                    return 1
+                fi
+                LAYER_NAME=$1
+                ;;
+        esac
+        shift
+    done
+    if [[ -z "$LAYER_NAME" ]]; then
+        LAYER_ERROR="must give one layer name"
+        return 1
+    fi
+    if [[ "$LAYER_NAME" == "$LAYER_PARENT" ]]; then
+        LAYER_ERROR="a layer cannot be its own parent"
+        return 1
+    fi
+    return 0
+}

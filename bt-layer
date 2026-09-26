@@ -1,0 +1,210 @@
+#!/bin/bash -e
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+
+[[ -z "$BT_DEBUG" ]] || set -x
+set -o pipefail
+
+APP=$(basename "$0")
+fatal() { echo "FATAL [$APP]: $*" 1>&2; exit 1; }
+warning() { echo "WARNING [$APP]: $*"; }
+info() { echo "INFO [$APP]: $*"; }
+
+usage() {
+    cat<<EOF
+Syntax: $APP [-p|--parent LAYER] [-u] layer
+Builds product \$BT_PRODUCTS/layer to root.patched and exports it as a layer
+
+Arguments::
+
+    layer               - product to build, also the name of the layer
+                          (e.g., core)
+
+Options::
+
+    -p|--parent LAYER   - build on top of layer LAYER (exported earlier by
+                          $APP on this host) instead of the bootstrap; only
+                          the overlays and conf scripts the parent did not
+                          run are applied, plus the ones every layer needs
+    -u|--use-existing   - skip the build and export the existing
+                          build/root.patched (fails if it is missing)
+
+Environment::
+
+    SOURCE_DATE_EPOCH   - mtime of every tarball entry; defaults to the
+                          commit time of the product
+    BT_GPGKEY           - when set, generate-signature writes a hash file
+                          next to the tarball; when unset a warning is printed
+    FAB_PATH            - fab tree (common/, altstraps/)
+    RELEASE, FAB_ARCH   - default to the host release and architecture
+    BT_DEBUG            - verbose output
+
+Output, in \$BT_BUILDS/layers/::
+
+    layer.tar.zst           full rootfs without --parent, the root.build and
+                            root.patched deck upper directories with --parent
+    layer.tar.zst.sha256    sha256sum of the tarball
+    layer.manifest          plain text, one "key value" per line
+    layer.rootfs/           copy of root.patched, the altstrap for children
+    layer.log               build log
+
+EOF
+    if [[ "$#" -ne 0 ]]; then
+        echo "Error: $*"
+        exit 1
+    fi
+    exit
+}
+
+link=$(readlink -f "$0")
+BT=$(dirname "$link")
+export BT
+export BT_CONFIG="$BT/config"
+if [[ ! -f "$BT_CONFIG/common.cfg" ]]; then
+    fatal "$BT_CONFIG/common.cfg not found - see $BT/config.example"
+fi
+# shellcheck source=config.example/common.cfg
+source "$BT_CONFIG/common.cfg"
+# shellcheck source=bin/layer-lib
+source "$BT/bin/layer-lib"
+
+layer_parse_args "$@" || usage "$LAYER_ERROR"
+[[ -z "$LAYER_HELP" ]] || usage
+layer=$LAYER_NAME
+parent=$LAYER_PARENT
+
+[[ -n "$FAB_PATH" ]] || fatal "FAB_PATH not set"
+[[ -n "$BT_PRODUCTS" ]] || fatal "BT_PRODUCTS not set"
+[[ -n "$BT_BUILDS" ]] || fatal "BT_BUILDS not set"
+product_dir=$BT_PRODUCTS/$layer
+[[ -f "$product_dir/Makefile" ]] || fatal "product not found: $product_dir"
+
+RELEASE=${RELEASE:-debian/$(lsb_release -sc)}
+FAB_ARCH=${FAB_ARCH:-$(dpkg --print-architecture)}
+export RELEASE FAB_ARCH
+export TERM=${TERM:-dumb}
+codename=$(basename "$RELEASE")
+kind=$(layer_kind "$parent")
+
+SOURCE_DATE_EPOCH=$(layer_epoch "$product_dir") || fatal "no usable SOURCE_DATE_EPOCH"
+export SOURCE_DATE_EPOCH
+info "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+
+layers_dir=$BT_BUILDS/layers
+mkdir -p "$layers_dir"
+build_dir=$product_dir/build
+log=$layers_dir/$layer.log
+
+parent_sha256=none
+if [[ -n "$parent" ]]; then
+    parent_sha256=$(layer_parent_resolve "$layers_dir" "$parent") \
+        || fatal "parent layer '$parent' is not usable"
+fi
+
+full_conf=$(layer_make_var "$product_dir" COMMON_CONF) \
+    || fatal "cannot read COMMON_CONF of $layer"
+full_overlays=$(layer_make_var "$product_dir" COMMON_OVERLAYS) \
+    || fatal "cannot read COMMON_OVERLAYS of $layer"
+build_conf=default
+build_overlays=default
+make_args=()
+if [[ -n "$parent" ]]; then
+    parent_manifest=$layers_dir/$parent.manifest
+    parent_conf=$(layer_manifest_get "$parent_manifest" common_conf) \
+        || fatal "parent manifest is incomplete"
+    parent_overlays=$(layer_manifest_get "$parent_manifest" common_overlays) \
+        || fatal "parent manifest is incomplete"
+    build_conf=$(layer_child_conf "$full_conf" "$parent_conf" "$FAB_PATH/common/conf")
+    build_overlays=$(layer_child_overlays "$full_overlays" "$parent_overlays")
+    make_args=("COMMON_OVERLAYS=$build_overlays" "COMMON_CONF=$build_conf")
+    info "overlays for this layer: $build_overlays"
+    info "conf for this layer: $build_conf"
+fi
+
+altstrap=
+cleanup() {
+    if [[ -n "$altstrap" ]]; then
+        rm -f "$altstrap"
+        altstrap=
+    fi
+}
+trap cleanup EXIT
+
+if [[ -z "$LAYER_USE_EXISTING" ]]; then
+    if [[ -n "$parent" ]]; then
+        altstrap_path=$(layer_altstrap_path "$FAB_PATH" "$codename" "$FAB_ARCH")
+        if [[ -e "$altstrap_path" || -L "$altstrap_path" ]]; then
+            fatal "$altstrap_path exists - another layered build in progress? remove it first"
+        fi
+        mkdir -p "$(dirname "$altstrap_path")"
+        ln -s "$layers_dir/$parent.rootfs" "$altstrap_path"
+        altstrap=$altstrap_path
+        info "altstrap $altstrap points at $layers_dir/$parent.rootfs"
+    fi
+    cd "$product_dir"
+    info "cleaning previous build of $layer"
+    make clean </dev/null >"$log" 2>&1 || true
+    info "building $layer root.patched (log: $log)"
+    started=$(date +%s)
+    make build/stamps/root.patched "${make_args[@]}" </dev/null 2>&1 | tee -a "$log" || true
+    for target in $(layer_umount_targets "$build_dir/root.patched"); do
+        warning "unmounting $target left behind by fab-chroot"
+        umount -l "$target"
+    done
+    cleanup
+    [[ -f "$build_dir/stamps/root.patched" ]] || fatal "build of $layer failed - see $log"
+    info "built $layer root.patched in $(( $(date +%s) - started )) s"
+fi
+
+layer_check_build "$kind" "$build_dir" || fatal "nothing to export for $layer"
+
+rootfs_copy=$layers_dir/$layer.rootfs
+info "copying root.patched to $rootfs_copy"
+rsync -aHAX --delete "$build_dir/root.patched/" "$rootfs_copy/"
+
+tarball=$layers_dir/$layer.tar.zst
+mapfile -t tar_flags < <(layer_tar_flags "$SOURCE_DATE_EPOCH")
+mapfile -t tar_members < <(layer_tar_members "$kind" "$build_dir")
+info "packing $kind layer $layer into $tarball"
+started=$(date +%s)
+tar "${tar_flags[@]}" -cf - "${tar_members[@]}" \
+    | zstd -q -T0 "-$LAYER_ZSTD_LEVEL" --force -o "$tarball"
+read -r sha256 size < <(layer_hash_size "$tarball")
+layer_write_sha256 "$tarball"
+info "packed $tarball: sha256 $sha256, $size bytes, $(( $(date +%s) - started )) s"
+
+manifest=$layers_dir/$layer.manifest
+layer_manifest_render \
+    layer "$layer" \
+    type "$kind" \
+    parent "${parent:-none}" \
+    parent_sha256 "$parent_sha256" \
+    release "$RELEASE" \
+    arch "$FAB_ARCH" \
+    product_commit "$(layer_git_commit "$product_dir")" \
+    common_commit "$(layer_git_commit "$FAB_PATH/common")" \
+    fab_version "$(fab --version)" \
+    source_date_epoch "$SOURCE_DATE_EPOCH" \
+    common_overlays "$full_overlays" \
+    common_conf "$full_conf" \
+    build_overlays "$build_overlays" \
+    build_conf "$build_conf" \
+    tarball "$(basename "$tarball")" \
+    sha256 "$sha256" \
+    size "$size" \
+    > "$manifest"
+info "wrote $manifest"
+
+if [[ -n "$BT_GPGKEY" ]]; then
+    "$BT/bin/generate-signature" "$tarball"
+else
+    warning "BT_GPGKEY not set - not generating $tarball.hash"
+fi
+
+info "layer $layer exported to $layers_dir"

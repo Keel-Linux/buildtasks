@@ -1,0 +1,351 @@
+#!/bin/bash -e
+# Test bt-layer and bin/layer-lib against scratch directories. Nothing is
+# built: products are fake Makefiles, fab and the signature helper are stubs.
+#
+# Code paths covered (40 of 40):
+#   layer-lib: layer_kind (rootfs, delta); layer_altstrap_path; layer_epoch
+#     (env, env invalid, git fallback, no git); layer_git_commit (git, none);
+#     layer_make_var (ok, failure); layer_words_has; layer_words_minus;
+#     layer_child_conf (stack on core with ssl ciphers, app on stack, no
+#     turnkey.d); layer_child_overlays; layer_manifest_render (ok, odd args,
+#     bad key); layer_manifest_get (ok, missing file, missing key);
+#     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
+#     layer_check_build (ok, no stamp, not mounted, no upper);
+#     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
+#     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
+#     layer_parse_args (help, name, parent, use-existing, no name, two
+#     names, unknown option, parent without value, self parent).
+#   bt-layer: --help; usage error; missing config; missing FAB_PATH; missing
+#     product; bad epoch; rootfs build with warning on BT_GPGKEY; RELEASE and
+#     FAB_ARCH fallbacks; unmount guard; delta build with parent (overrides,
+#     altstrap created and removed, hash file with BT_GPGKEY); repeated
+#     export with -u is byte identical; -u without a build; unknown parent;
+#     stale altstrap symlink; parent manifest without conf list; product
+#     without a debug target; failing make removes the altstrap; TERM default.
+
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $0
+Test bt-layer and bin/layer-lib without building anything
+EOF
+exit 1
+}
+
+[[ "$1" != "-h" ]] && [[ "$1" != "--help" ]] || usage
+
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+source "$BT/bin/layer-lib"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+expect_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
+
+assert_eq() {
+    local label=$1
+    local got=$2
+    local want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+assert_file() {
+    [[ -f "$1" ]] || fatal "missing file: $1"
+}
+
+write_product() {
+    local dir=$1
+    local conf=$2
+    local overlays=$3
+    mkdir -p "$dir"
+    cat > "$dir/Makefile" <<EOF
+COMMON_CONF := $conf
+COMMON_OVERLAYS := $overlays
+
+debug:
+	\$(foreach v,\$(V),\$(warning \$(v) = \$(\$(v))))
+	@true
+
+clean:
+	rm -rf build
+
+build/stamps/root.patched:
+	test ! -f FAIL
+	mkdir -p build/stamps build/root.patched/bin build/root.patched/etc
+	mkdir -p build/.deck/root.build/upper/usr/lib
+	mkdir -p build/.deck/root.build/upper/var/cache/apt/archives/partial
+	mkdir -p build/.deck/root.patched/upper/etc
+	printf '#!/bin/sh\\n' > build/root.patched/bin/bash
+	chmod 755 build/root.patched/bin/bash
+	echo hostname > build/root.patched/etc/hostname
+	echo lib > build/.deck/root.build/upper/usr/lib/x.so
+	echo deb > build/.deck/root.build/upper/var/cache/apt/archives/x.deb
+	echo bin > build/.deck/root.build/upper/var/cache/apt/pkgcache.bin
+	echo conf > build/.deck/root.patched/upper/etc/x.conf
+	echo "\$(COMMON_OVERLAYS)" > build/overlays.used
+	echo "\$(COMMON_CONF)" > build/conf.used
+	echo "\$\$TERM" > build/term.used
+	readlink "\$(FAB_PATH)/altstraps/trixie-amd64.core" > build/altstrap.used || true
+	touch build/stamps/root.patched
+EOF
+}
+
+info "1: layer_kind"
+assert_eq kind-rootfs "$(layer_kind "")" rootfs
+assert_eq kind-delta "$(layer_kind core)" delta
+
+info "2: layer_altstrap_path"
+assert_eq altstrap "$(layer_altstrap_path /turnkey/fab trixie amd64)" \
+    /turnkey/fab/altstraps/trixie-amd64.core
+
+info "3: layer_epoch"
+gitdir=$tmp/gitprod
+mkdir -p "$gitdir"
+git -C "$gitdir" init -q
+GIT_COMMITTER_DATE=@1600000000 git -C "$gitdir" -c user.name=t -c user.email=t@[2001:db8::1] \
+    commit -q --allow-empty --date=@1600000000 -m init
+assert_eq epoch-env "$(SOURCE_DATE_EPOCH=1700000000 layer_epoch "$gitdir")" 1700000000
+expect_fail epoch-invalid env SOURCE_DATE_EPOCH=soon bash -c \
+    "source '$BT/bin/layer-lib'; layer_epoch '$gitdir'"
+assert_eq epoch-git "$(SOURCE_DATE_EPOCH= layer_epoch "$gitdir")" 1600000000
+mkdir -p "$tmp/nogit"
+expect_fail epoch-nogit env SOURCE_DATE_EPOCH= bash -c \
+    "source '$BT/bin/layer-lib'; layer_epoch '$tmp/nogit'"
+
+info "4: layer_git_commit"
+assert_eq commit-git "$(layer_git_commit "$gitdir")" "$(git -C "$gitdir" rev-parse HEAD)"
+assert_eq commit-none "$(layer_git_commit "$tmp/nogit")" none
+
+info "5: layer_make_var"
+write_product "$tmp/products/core" "turnkey.d" "turnkey.d"
+assert_eq make-var "$(layer_make_var "$tmp/products/core" COMMON_CONF)" turnkey.d
+expect_fail make-var-fail layer_make_var "$tmp/nogit" COMMON_CONF
+
+info "6: layer_words_has and layer_words_minus"
+layer_words_has "a b c" b || fatal "words_has: b not found"
+expect_fail words-has-missing layer_words_has "a b c" d
+assert_eq words-minus "$(layer_words_minus "a b c d" "b d")" "a c"
+assert_eq words-minus-empty "$(layer_words_minus "a" "a")" ""
+
+info "7: layer_child_conf"
+conf_path=$tmp/common/conf
+mkdir -p "$conf_path"
+echo 'cat /tmp/ZZ_SSL_CIPHERS' > "$conf_path/apache-ssl"
+echo 'true' > "$conf_path/php"
+core_conf="turnkey.d"
+lamp_conf="turnkey.d tkl-webcp apache-cgi apache-ssl php mysql"
+wp_conf="turnkey.d apache-credit apache-cgi apache-ssl php mysql"
+assert_eq child-conf-stack "$(layer_child_conf "$lamp_conf" "$core_conf" "$conf_path")" \
+    "turnkey.d/hostname turnkey.d/zz-ssl-ciphers tkl-webcp apache-cgi apache-ssl php mysql"
+assert_eq child-conf-app "$(layer_child_conf "$wp_conf" "$lamp_conf" "$conf_path")" \
+    "turnkey.d/hostname apache-credit php"
+assert_eq child-conf-plain "$(layer_child_conf "a b" "a" "$conf_path")" "b"
+
+info "8: layer_child_overlays"
+assert_eq child-overlays "$(layer_child_overlays "turnkey.d apache php" "turnkey.d")" \
+    "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot apache php"
+assert_eq child-overlays-none "$(layer_child_overlays "turnkey.d" "turnkey.d")" \
+    "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot"
+
+info "9: layer_manifest_render and layer_manifest_get"
+manifest=$tmp/test.manifest
+layer_manifest_render layer core sha256 abc common_conf "turnkey.d php" > "$manifest"
+assert_eq manifest-get "$(layer_manifest_get "$manifest" common_conf)" "turnkey.d php"
+assert_eq manifest-get-first "$(layer_manifest_get "$manifest" layer)" core
+expect_fail manifest-odd layer_manifest_render layer core sha256
+expect_fail manifest-badkey layer_manifest_render "Bad Key" x
+expect_fail manifest-nofile layer_manifest_get "$tmp/none.manifest" sha256
+expect_fail manifest-nokey layer_manifest_get "$manifest" size
+
+info "10: layer_tar_flags and layer_tar_members"
+flags=$(layer_tar_flags 1700000000)
+for want in --sort=name --mtime=@1700000000 --numeric-owner --xattrs \
+        "--xattrs-include=trusted.overlay.*" "--exclude=./var/cache/apt/archives/*" \
+        "--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime"; do
+    grep -qxF -- "$want" <<<"$flags" || fatal "tar flag missing: $want"
+done
+assert_eq members-rootfs "$(layer_tar_members rootfs /b | tr '\n' ' ')" "-C /b/root.patched . "
+assert_eq members-delta "$(layer_tar_members delta /b | tr '\n' ' ')" \
+    "-C /b/.deck/root.build/upper . -C /b/.deck/root.patched/upper . "
+expect_fail members-unknown layer_tar_members squashfs /b
+
+info "11: layer_check_build"
+build=$tmp/build
+expect_fail check-nostamp layer_check_build rootfs "$build"
+mkdir -p "$build/stamps" "$build/root.patched"
+touch "$build/stamps/root.patched"
+expect_fail check-unmounted layer_check_build rootfs "$build"
+mkdir -p "$build/root.patched/bin"
+touch "$build/root.patched/bin/bash"
+chmod 755 "$build/root.patched/bin/bash"
+layer_check_build rootfs "$build"
+expect_fail check-noupper layer_check_build delta "$build"
+mkdir -p "$build/.deck/root.build/upper" "$build/.deck/root.patched/upper"
+layer_check_build delta "$build"
+
+info "12: layer_hash_size and layer_write_sha256"
+echo foo > "$tmp/foo"
+read -r sha size < <(layer_hash_size "$tmp/foo")
+assert_eq hash "$sha" "$(sha256sum "$tmp/foo" | cut -d ' ' -f 1)"
+assert_eq size "$size" 4
+expect_fail hash-missing layer_hash_size "$tmp/nothing"
+layer_write_sha256 "$tmp/foo"
+assert_eq sha256-file "$(cat "$tmp/foo.sha256")" "$sha  foo"
+
+info "13: layer_umount_targets"
+assert_eq umount-none "$(layer_umount_targets "$build/root.patched")" ""
+mountpoint() { [[ "$2" == */proc ]] || [[ "$2" == */dev/pts ]]; }
+assert_eq umount-some "$(layer_umount_targets /r | tr '\n' ' ')" "/r/dev/pts /r/proc "
+unset -f mountpoint
+
+info "14: layer_parent_resolve"
+layers=$tmp/layers
+mkdir -p "$layers/core.rootfs/bin"
+expect_fail parent-norootfs layer_parent_resolve "$layers" core
+touch "$layers/core.rootfs/bin/bash"
+chmod 755 "$layers/core.rootfs/bin/bash"
+expect_fail parent-nomanifest layer_parent_resolve "$layers" core
+layer_manifest_render layer core sha256 deadbeef > "$layers/core.manifest"
+assert_eq parent-sha "$(layer_parent_resolve "$layers" core)" deadbeef
+rm -rf "$layers"
+
+info "15: layer_parse_args"
+layer_parse_args --help
+assert_eq parse-help "$LAYER_HELP" yes
+layer_parse_args lamp
+assert_eq parse-name "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "lamp||"
+layer_parse_args -u lamp --parent core
+assert_eq parse-parent "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "lamp|core|yes"
+layer_parse_args wordpress -p lamp --use-existing
+assert_eq parse-short "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "wordpress|lamp|yes"
+for bad in "" "a b" "--bogus a" "a --parent" "a --parent a"; do
+    if layer_parse_args $bad 2>/dev/null; then
+        fatal "parse_args should have failed on '$bad'"
+    fi
+    [[ -n "$LAYER_ERROR" ]] || fatal "parse_args gave no error for '$bad'"
+done
+
+info "16: bt-layer setup (scratch copy with stubs)"
+sbt=$tmp/bt
+mkdir -p "$sbt/bin" "$sbt/config" "$tmp/stubs" "$tmp/guard" "$tmp/fab/common/conf" "$tmp/builds"
+cp "$BT/bt-layer" "$sbt/bt-layer"
+cp "$BT/bin/layer-lib" "$sbt/bin/layer-lib"
+printf '#!/bin/bash\ntouch "$1.hash"\n' > "$sbt/bin/generate-signature"
+printf '#!/bin/bash\necho 1.1.1\n' > "$tmp/stubs/fab"
+printf '#!/bin/bash\necho trixie\n' > "$tmp/stubs/lsb_release"
+printf '#!/bin/bash\necho amd64\n' > "$tmp/stubs/dpkg"
+printf '#!/bin/bash\n[[ "$2" == */proc ]]\n' > "$tmp/guard/mountpoint"
+printf '#!/bin/bash\necho "$*" >> "%s/umount.log"\n' "$tmp" > "$tmp/guard/umount"
+chmod 755 "$sbt/bin/generate-signature" "$tmp/stubs"/* "$tmp/guard"/*
+echo 'cat /tmp/ZZ_SSL_CIPHERS' > "$tmp/fab/common/conf/apache-ssl"
+cat > "$sbt/config/common.cfg" <<EOF
+export BT_BUILDS=$tmp/builds
+export BT_PRODUCTS=$tmp/products
+EOF
+write_product "$tmp/products/lamp" "turnkey.d apache-ssl php mysql" "turnkey.d apache php"
+write_product "$tmp/products/broken" "turnkey.d" "turnkey.d"
+touch "$tmp/products/broken/FAIL"
+export PATH=$tmp/stubs:$PATH
+export FAB_PATH=$tmp/fab
+export RELEASE=debian/trixie FAB_ARCH=amd64 SOURCE_DATE_EPOCH=1700000000
+unset BT_GPGKEY
+
+info "17: bt-layer usage and early failures"
+"$sbt/bt-layer" --help | grep -q '^Syntax:' || fatal "help text missing"
+expect_fail no-args "$sbt/bt-layer"
+expect_fail no-product "$sbt/bt-layer" nothere
+expect_fail bad-epoch env SOURCE_DATE_EPOCH=soon "$sbt/bt-layer" core
+expect_fail no-fab-path env FAB_PATH= "$sbt/bt-layer" core
+mv "$sbt/config/common.cfg" "$sbt/config/common.cfg.off"
+expect_fail no-config "$sbt/bt-layer" core
+mv "$sbt/config/common.cfg.off" "$sbt/config/common.cfg"
+expect_fail use-existing-nobuild "$sbt/bt-layer" -u core
+
+info "18: bt-layer core (rootfs layer, no key, release fallbacks, unmount guard)"
+out=$(env -u RELEASE -u FAB_ARCH -u TERM PATH="$tmp/guard:$PATH" "$sbt/bt-layer" core)
+grep -q 'WARNING.*BT_GPGKEY not set' <<<"$out" || fatal "expected BT_GPGKEY warning"
+grep -q 'unmounting .*root.patched/proc' <<<"$out" || fatal "unmount guard did not run"
+assert_eq term-default "$(cat "$tmp/products/core/build/term.used")" dumb
+assert_eq umount-call "$(cat "$tmp/umount.log")" "-l $tmp/products/core/build/root.patched/proc"
+L=$tmp/builds/layers
+assert_file "$L/core.tar.zst"
+assert_file "$L/core.tar.zst.sha256"
+assert_file "$L/core.manifest"
+assert_file "$L/core.log"
+assert_file "$L/core.rootfs/etc/hostname"
+[[ ! -e "$L/core.tar.zst.hash" ]] || fatal "hash file written without BT_GPGKEY"
+[[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap created for a root layer"
+assert_eq core-type "$(layer_manifest_get "$L/core.manifest" type)" rootfs
+assert_eq core-parent "$(layer_manifest_get "$L/core.manifest" parent)" none
+assert_eq core-parent-sha "$(layer_manifest_get "$L/core.manifest" parent_sha256)" none
+assert_eq core-release "$(layer_manifest_get "$L/core.manifest" release)" debian/trixie
+assert_eq core-arch "$(layer_manifest_get "$L/core.manifest" arch)" amd64
+assert_eq core-fab "$(layer_manifest_get "$L/core.manifest" fab_version)" 1.1.1
+assert_eq core-epoch "$(layer_manifest_get "$L/core.manifest" source_date_epoch)" 1700000000
+assert_eq core-conf "$(layer_manifest_get "$L/core.manifest" build_conf)" default
+assert_eq core-sha "$(layer_manifest_get "$L/core.manifest" sha256)" \
+    "$(sha256sum "$L/core.tar.zst" | cut -d ' ' -f 1)"
+assert_eq core-size "$(layer_manifest_get "$L/core.manifest" size)" "$(stat -c %s "$L/core.tar.zst")"
+assert_eq core-sha256-file "$(cut -d ' ' -f 1 "$L/core.tar.zst.sha256")" \
+    "$(layer_manifest_get "$L/core.manifest" sha256)"
+assert_eq core-members "$(zstd -dc "$L/core.tar.zst" | tar -t | sort | tr '\n' ' ')" \
+    "./ ./bin/ ./bin/bash ./etc/ ./etc/hostname "
+assert_eq core-mtime "$(zstd -dc "$L/core.tar.zst" | tar -tv --full-time ./etc/hostname | awk '{print $4}')" \
+    "$(date -u -d @1700000000 +%F)"
+
+info "19: bt-layer lamp --parent core (delta layer, key set)"
+out=$(BT_GPGKEY=test "$sbt/bt-layer" lamp --parent core)
+assert_file "$L/lamp.tar.zst.hash"
+assert_eq lamp-type "$(layer_manifest_get "$L/lamp.manifest" type)" delta
+assert_eq lamp-parent "$(layer_manifest_get "$L/lamp.manifest" parent)" core
+assert_eq lamp-parent-sha "$(layer_manifest_get "$L/lamp.manifest" parent_sha256)" \
+    "$(layer_manifest_get "$L/core.manifest" sha256)"
+assert_eq lamp-common-conf "$(layer_manifest_get "$L/lamp.manifest" common_conf)" \
+    "turnkey.d apache-ssl php mysql"
+assert_eq lamp-build-conf "$(layer_manifest_get "$L/lamp.manifest" build_conf)" \
+    "turnkey.d/hostname turnkey.d/zz-ssl-ciphers apache-ssl php mysql"
+assert_eq lamp-build-overlays "$(layer_manifest_get "$L/lamp.manifest" build_overlays)" \
+    "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot apache php"
+assert_eq lamp-conf-used "$(cat "$tmp/products/lamp/build/conf.used")" \
+    "turnkey.d/hostname turnkey.d/zz-ssl-ciphers apache-ssl php mysql"
+assert_eq lamp-overlays-used "$(cat "$tmp/products/lamp/build/overlays.used")" \
+    "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot apache php"
+assert_eq lamp-altstrap-used "$(cat "$tmp/products/lamp/build/altstrap.used")" "$L/core.rootfs"
+[[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap left behind"
+assert_eq lamp-members "$(zstd -dc "$L/lamp.tar.zst" | tar -t | sort -u | tr '\n' ' ')" \
+    "./ ./etc/ ./etc/x.conf ./usr/ ./usr/lib/ ./usr/lib/x.so ./var/ ./var/cache/ ./var/cache/apt/ ./var/cache/apt/archives/ "
+cp "$L/lamp.manifest" "$tmp/lamp-first.manifest"
+
+info "20: repeated export with -u is byte identical"
+find "$tmp/products/lamp/build/.deck" -exec touch -d @1234567890 {} +
+"$sbt/bt-layer" -u lamp --parent core >/dev/null
+cmp -s "$tmp/lamp-first.manifest" "$L/lamp.manifest" || fatal "manifest changed on re-export"
+
+info "21: bt-layer failures with a parent"
+expect_fail unknown-parent "$sbt/bt-layer" lamp --parent nothere
+mkdir -p "$FAB_PATH/altstraps"
+ln -s /nowhere "$FAB_PATH/altstraps/trixie-amd64.core"
+out=$("$sbt/bt-layer" lamp --parent core 2>&1 || true)
+grep -q 'altstraps/trixie-amd64.core exists' <<<"$out" || fatal "stale altstrap not detected"
+rm "$FAB_PATH/altstraps/trixie-amd64.core"
+sed -i '/^common_conf /d' "$L/core.manifest"
+expect_fail parent-manifest-incomplete "$sbt/bt-layer" lamp --parent core
+layer_manifest_render common_conf turnkey.d >> "$L/core.manifest"
+mkdir -p "$tmp/products/nodebug"
+printf 'all:\n\ttrue\n' > "$tmp/products/nodebug/Makefile"
+expect_fail no-debug-target "$sbt/bt-layer" nodebug
+expect_fail make-fails "$sbt/bt-layer" broken --parent core
+[[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap left behind after failed make"
+grep -q 'test ! -f FAIL' "$L/broken.log" || fatal "build log not written on failure"
+
+echo
+info "all tests passed"
