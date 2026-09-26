@@ -10,6 +10,7 @@
 #     turnkey.d); layer_child_overlays; layer_manifest_render (ok, odd args,
 #     bad key); layer_manifest_get (ok, missing file, missing key);
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
+#     layer_audit_packages (clean, unconfigured package);
 #     layer_check_build (ok, no stamp, not mounted, no upper);
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
 #     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
@@ -177,6 +178,32 @@ assert_eq members-rootfs "$(layer_tar_members rootfs /b | tr '\n' ' ')" "-C /b/r
 assert_eq members-delta "$(layer_tar_members delta /b | tr '\n' ' ')" \
     "-C /b/.deck/root.build/upper . -C /b/.deck/root.patched/upper . "
 expect_fail members-unknown layer_tar_members squashfs /b
+
+info "10b: layer_audit_packages"
+audit_root=$tmp/auditfs
+mkdir -p "$audit_root/var/lib/dpkg"
+cat > "$audit_root/var/lib/dpkg/status" << 'STATUS'
+Package: bash
+Status: install ok installed
+Version: 5.2
+
+Package: confconsole
+Status: install ok unpacked
+Version: 2.2.3+keel1
+
+STATUS
+expect_fail audit-unconfigured layer_audit_packages "$audit_root"
+cat > "$audit_root/var/lib/dpkg/status" << 'STATUS'
+Package: bash
+Status: install ok installed
+Version: 5.2
+
+Package: confconsole
+Status: install ok installed
+Version: 2.2.3+keel1
+
+STATUS
+expect_ok audit-clean layer_audit_packages "$audit_root"
 
 info "11: layer_check_build"
 build=$tmp/build
