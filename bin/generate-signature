@@ -1,141 +1,196 @@
 #!/bin/bash -e
 # Copyright (c) 2011-2020 TurnKey GNU/Linux - http://www.turnkeylinux.org
-# 
+# Copyright (c) 2026 KeelLinux
+#
 # This file is part of buildtasks.
-# 
+#
 # Buildtasks is free software; you can redistribute it and/or modify it
 # under the terms of the GNU Affero General Public License as published by the
 # Free Software Foundation; either version 3 of the License, or (at your
 # option) any later version.
 
+set -o pipefail
 
-fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
-info() { echo "INFO [$(basename "$0")]: $*"; }
+APP=$(basename "$0")
+fatal() { echo "FATAL [$APP]: $*" 1>&2; exit 1; }
+warning() { echo "WARNING [$APP]: $*"; }
+info() { echo "INFO [$APP]: $*"; }
 
 usage() {
 cat<<EOF
-Syntax: $0 filepath
+Syntax: $APP [-r|--require-signature] filepath
 
-Generate hash for filepath (e.g., path/to/iso). Hash file will be created in
-the same dir as the file being hashed.
+Hash filepath (e.g., path/to/iso) and, when a signing key is configured, sign
+the hash file with it. Output is written in the same dir as the file hashed.
+
+With BT_GPGKEY set: <filepath>.hash, clearsigned with that key and naming that
+key, its fingerprint and where it is published. The signature is verified
+against the key before this script returns.
+
+Without BT_GPGKEY: <filepath>.sha256 and <filepath>.sha512 only. No hash file,
+because a hash file tells the reader which key to verify with and nothing
+signed this one; an existing hash file is removed.
 
 Arguments::
 
-    filepath        - path to file to be signed
+    filepath        - path to the file to be hashed and signed
+
+Options::
+
+    -r|--require-signature
+                    - fail when no signing key is configured instead of
+                      writing plain digests
+    -h|--help       - display this usage info and exit
 
 Environment::
 
+    BT_GPGKEY       - key that signs the hash file (id, fingerprint or uid).
+                      When unset nothing is signed and no key is named.
+    BT_SIGN_KEY_EMAIL
+                    - address of the signing key to quote in the hash file.
+                      Defaults to the address in the key's first user id.
+    BT_SIGN_KEY_FPR - fingerprint the signing key must have, checked against
+                      the key BT_GPGKEY resolves to; a mismatch is fatal.
+    BT_SIGN_KEY_FILE
+                    - name of the published key file under
+                      \$FAB_PATH/common/keys; its key must be the signing key.
+    BT_SIGN_KEY_URL - where that key is published. Defaults to none, and the
+                      hash file then says the key comes with the release.
     RELEASE         - RELEASE to build for in the format DISTRO/CODENAME.
                       If not set, defaults to host system.
                       Example: debian/trixie
     BT_DEBUG        - verbose debugging output
 
+The TurnKey defaults (tkl-CODENAME-images.asc, the release-CODENAME-images
+address and the key URL under raw.githubusercontent.com/turnkeylinux/common)
+apply in one case only: when the key doing the signing is that key. A fork
+building an upstream artifact with the upstream key therefore writes the file
+upstream writes, and never names that key otherwise.
+
 EOF
 exit 1
 }
 
-if [[ "$#" != "1" ]]; then
-    usage
-fi
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+# shellcheck source=bin/signature-lib
+source "$BT/bin/signature-lib"
+
+unset filepath require_sig
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage ;;
+        -r|--require-signature) require_sig=yes ;;
+        -*) echo "unrecognized option: $1" 1>&2; usage ;;
+        *) [[ -z "$filepath" ]] || usage; filepath=$1 ;;
+    esac
+    shift
+done
+[[ -n "$filepath" ]] || usage
 
 [[ -z "$BT_DEBUG" ]] || set -x
 
-get_tkl_ver_no() {
-    case $1 in
-        bookworm)
-            echo "18.x"
-            ;;
-        trixie)
-            echo "19.x"
-            ;;
-        forky)
-            echo "20.x"
-            ;;
-        *)
-            fatal "Unable top match codename '$1' to a TurnKey version"
-            ;;
-    esac
-}
-
-filepath=$1
-filename=$(basename "$1")
-if [[ ! -f "$filepath" ]]; then
-    fatal "$filepath is not a file"
-fi
+[[ -f "$filepath" ]] || fatal "$filepath is not a file"
+filename=$(basename "$filepath")
 
 # if release not set, assume same as host
 RELEASE=${RELEASE:-debian/$(lsb_release -sc)}
 CODENAME=$(basename "$RELEASE")
-if [[ "$(basename "$filename")" == bootstrap-$CODENAME*.tar.gz ]]; then
-    BRANCH="$(get_tkl_ver_no "$CODENAME")"
-elif [[ "$filename" == "turnkey"*".iso" ]]; then
-    BRANCH="$(sed -En 's|^[a-z0-9-]+-([0-9]+)\.[0-9].*|\1|p'<<<"$filename").x"
-elif [[ "$filename" == *.tar.zst ]]; then
-    BRANCH="$(get_tkl_ver_no "$CODENAME")"
-else
-    fatal "Unexpected filename: $filename"
-fi
 
 info "generating sha256sum hash"
-SHA256SUM="$(sha256sum "$filepath" | cut -d " " -f 1)  $filename"
+SHA256SUM=$(sha256sum "$filepath" | cut -d " " -f 1)
 
 info "generating sha512sum hash"
-SHA512SUM="$(sha512sum "$filepath" | cut -d " " -f 1)  $filename"
+SHA512SUM=$(sha512sum "$filepath" | cut -d " " -f 1)
 
-TKL_KEY=tkl-$CODENAME-images.asc
-KEY_EMAIL=release-$CODENAME-images@turnkeylinux.org
-
-KEY_URL=https://raw.githubusercontent.com/turnkeylinux/common/$BRANCH/keys/$TKL_KEY
-
-# first try local common
-if [[ -f "$FAB_PATH/common/keys/$TKL_KEY" ]]; then
-    GET_KEY_COM="cat $FAB_PATH/common/keys/$TKL_KEY"
-else
-    GET_KEY_COM="curl $KEY_URL"
+if [[ -z "$BT_GPGKEY" ]]; then
+    sig_digest_line "$SHA256SUM" "$filename" > "$filepath.sha256"
+    sig_digest_line "$SHA512SUM" "$filename" > "$filepath.sha512"
+    info "wrote $filepath.sha256 and $filepath.sha512"
+    if [[ -f "$filepath.hash" ]]; then
+        rm -f "$filepath.hash"
+        warning "removed $filepath.hash: it names a signing key and nothing signed $filename"
+    fi
+    [[ -z "$require_sig" ]] || fatal "--require-signature given but BT_GPGKEY is not set"
+    warning "BT_GPGKEY not set - digests only, no hash file, nothing signed"
+    exit 0
 fi
-TMP_KEYRING=/tmp/temp.gpg
-GPG_COMMAND="gpg --no-default-keyring --keyring $TMP_KEYRING"
-$GET_KEY_COM | $GPG_COMMAND --import
-GPG_LISTKEYS=$($GPG_COMMAND --list-keys --with-fingerprint "$KEY_EMAIL" \
-    | sed "s|^|      |g")
-UID_INFO=$($GPG_COMMAND --with-colons --fingerprint "$KEY_EMAIL" \
-    | grep "$KEY_EMAIL" | sed "s|^.*::\(.*\):$|\1|")
-FINGERPRINT=$($GPG_COMMAND --with-colons --fingerprint "$KEY_EMAIL" \
-    | awk -F: '$1 == "fpr" {print $10;}' | head -1)
+
+colons=$(gpg --with-colons --fingerprint --list-keys "$BT_GPGKEY" 2>/dev/null) || fatal "BT_GPGKEY '$BT_GPGKEY' is not in the keyring"
+KEY_FPR=$(sig_colons_fpr "$colons") || fatal "no fingerprint for '$BT_GPGKEY'"
+KEY_UID=$(sig_colons_uid "$colons") || fatal "key $KEY_FPR has no user id"
+KEY_ALGO=$(sig_colons_algo "$colons") || fatal "cannot name the algorithm of key $KEY_FPR"
+KEY_EMAIL=$BT_SIGN_KEY_EMAIL
+if [[ -z "$KEY_EMAIL" ]]; then
+    KEY_EMAIL=$(sig_uid_email "$KEY_UID") || fatal "set BT_SIGN_KEY_EMAIL: no address in '$KEY_UID'"
+fi
+if [[ -n "$BT_SIGN_KEY_FPR" ]]; then
+    sig_fpr_known "$(sig_colons_fprs "$colons")" "$BT_SIGN_KEY_FPR" || fatal "BT_SIGN_KEY_FPR $BT_SIGN_KEY_FPR is not a fingerprint of the signing key $KEY_FPR"
+fi
+
+# The upstream key file and key URL are defaults in one case only: an artifact
+# signed with the upstream release key of this codename.
+KEY_FILE=$BT_SIGN_KEY_FILE
+KEY_URL=$BT_SIGN_KEY_URL
+unset upstream
+if [[ "$KEY_EMAIL" == "$(sig_upstream_key_email "$CODENAME")" ]]; then
+    upstream=yes
+    KEY_FILE=${KEY_FILE:-$(sig_upstream_key_file "$CODENAME")}
+    if [[ -z "$KEY_URL" ]]; then
+        BRANCH=$(sig_branch_for_file "$filename" "$CODENAME") || fatal "set BT_SIGN_KEY_URL: cannot tell which branch publishes the key for $filename"
+        KEY_URL=$(sig_upstream_key_url "$BRANCH" "$KEY_FILE")
+    fi
+fi
+
+# An unsigned hash file names a key that did not sign anything, which is worse
+# than no hash file at all, so a run that dies between writing and signing
+# takes the file with it.
+hash_written=
+cleanup() {
+    local rc=$?
+    rm -rf "${TMP_KEYRING%/*}"
+    if [[ "$rc" -ne 0 ]] && [[ -n "$hash_written" ]]; then
+        rm -f "$filepath.hash"
+        warning "removed the unsigned $filepath.hash left by a failed run"
+    fi
+}
+
+# The hash file quotes the published key, so the published key is checked
+# against the key that signs.
+TMP_KEYRING=$(mktemp -d)/signing-key.gpg
+trap cleanup EXIT
+# --no-auto-check-trustdb: a keyring of one key makes gpg rebuild the trust
+# database, which fails on a host whose database records an ultimately
+# trusted key that this keyring does not hold. Nothing here reads trust.
+GPG_KEYRING=(gpg --no-auto-check-trustdb --no-default-keyring --keyring "$TMP_KEYRING")
+PUBLISHED_KEY=${TMP_KEYRING%/*}/published-key
+if [[ -n "$KEY_FILE" ]] && [[ -f "$FAB_PATH/common/keys/$KEY_FILE" ]]; then
+    KEY_SOURCE="$FAB_PATH/common/keys/$KEY_FILE"
+    cp "$KEY_SOURCE" "$PUBLISHED_KEY" || fatal "cannot read $KEY_SOURCE"
+elif [[ -n "$KEY_URL" ]]; then
+    KEY_SOURCE=$KEY_URL
+    gpg_err=$(curl -fsSL "$KEY_URL" > "$PUBLISHED_KEY" 2>&1) || fatal "cannot fetch the key published at $KEY_URL: $gpg_err"
+else
+    KEY_SOURCE="the keyring of $(id -un)"
+    gpg_err=$(gpg --export "$BT_GPGKEY" > "$PUBLISHED_KEY" 2>&1) || fatal "cannot export $BT_GPGKEY: $gpg_err"
+fi
+gpg_err=$("${GPG_KEYRING[@]}" --import "$PUBLISHED_KEY" 2>&1) || fatal "cannot import the key from $KEY_SOURCE: $gpg_err"
+
+pub_colons=$("${GPG_KEYRING[@]}" --with-colons --fingerprint "$KEY_EMAIL" 2>/dev/null) || fatal "$KEY_SOURCE holds no key for $KEY_EMAIL"
+PUBLISHED_FPR=$(sig_colons_fpr "$pub_colons") || fatal "no fingerprint in the key from $KEY_SOURCE"
+[[ "$PUBLISHED_FPR" == "$KEY_FPR" ]] || fatal "the key at $KEY_SOURCE is $PUBLISHED_FPR but $filename is signed by $KEY_FPR: the hash file would name a key that did not sign it"
+GPG_LISTKEYS=$("${GPG_KEYRING[@]}" --list-keys --with-fingerprint "$KEY_EMAIL" | sed "s|^|      |g")
+UID_INFO=$KEY_UID
+[[ -z "$upstream" ]] || UID_INFO=$(sig_uid_info_compat "$pub_colons" "$KEY_EMAIL")
 
 info "writing hash file"
-cat > "$filepath.hash" <<EOF
-To ensure the image has not been corrupted in transmit or tampered with,
-perform the following two steps to cryptographically verify image integrity:
+sig_hash_text "$filename" "$SHA256SUM" "$SHA512SUM" "$KEY_EMAIL" "$KEY_FPR" "$UID_INFO" "$GPG_LISTKEYS" "$KEY_ALGO" "$KEY_URL" > "$filepath.hash"
+hash_written=yes
 
-1. Verify the authenticity of this file by checking that it is signed with our
-   GPG release key:
+info "signing $filepath.hash with $KEY_FPR"
+gpg -u "$BT_GPGKEY" --yes --output "$filepath.hash.asc" --clearsign "$filepath.hash" || fatal "signing $filepath.hash with $BT_GPGKEY failed"
+mv "$filepath.hash.asc" "$filepath.hash"
 
-    $ curl $KEY_URL | gpg --import
-    $ gpg --list-keys --with-fingerprint $KEY_EMAIL
-$GPG_LISTKEYS
-    $ gpg --verify $filename.hash
-      gpg: Signature made using RSA key ID $FINGERPRINT
-      gpg: Good signature from "$UID_INFO"
-
-2. Recalculate the image hash and make sure it matches your choice of hash below.
-
-    $ sha256sum $filename
-      $SHA256SUM
-
-    $ sha512sum $filename
-      $SHA512SUM
-
-   Note, you can compare hashes automatically::
-
-    $ sha256sum -c $filename.hash
-      $filename: OK
-
-    $ sha512sum -c $filename.hash
-      $filename: OK
-
-    Final note, when checking SHAs automatically, please ignore warning noting
-    that some lines are improperly formatted.
-
-EOF
-rm -f $TMP_KEYRING*
+status=$(gpg --status-fd 1 --verify "$filepath.hash" 2>/dev/null) || fatal "$filepath.hash does not verify"
+SIGNED_BY=$(sig_validsig_primary "$status") || fatal "no good signature on $filepath.hash"
+[[ "$SIGNED_BY" == "$KEY_FPR" ]] || fatal "$filepath.hash is signed by $SIGNED_BY, not by $KEY_FPR"
+info "$filepath.hash is signed by $KEY_FPR ($KEY_EMAIL) and verifies"

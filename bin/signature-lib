@@ -1,0 +1,213 @@
+#!/bin/bash
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# Functions shared by bin/generate-signature and tests/signature. Meant to be
+# sourced. Every function reads its inputs from its arguments, prints its
+# result on stdout and returns non-zero with a message on stderr instead of
+# exiting, so the caller decides what is fatal.
+#
+# No signing identity is hardcoded in the rendering: the caller passes the
+# key, its fingerprint, its user id and the URL it is published at. The
+# TurnKey values below are defaults for one case only, an upstream artifact
+# signed with the upstream release key, and bin/generate-signature applies
+# them only when that key is the key doing the signing.
+
+SIG_UPSTREAM_COMMON_URL="https://raw.githubusercontent.com/turnkeylinux/common"
+SIG_UPSTREAM_KEY_DOMAIN="turnkeylinux.org"
+
+sig_error() {
+    echo "ERROR [signature-lib]: $*" 1>&2
+    return 1
+}
+
+# The TurnKey branch that publishes the key for a Debian codename.
+sig_branch_for_codename() {
+    case $1 in
+        bookworm) echo "18.x" ;;
+        trixie) echo "19.x" ;;
+        forky) echo "20.x" ;;
+        *) sig_error "no TurnKey version matches codename '$1'"; return 1 ;;
+    esac
+}
+
+# The same, from the name of the artifact: an upstream ISO carries its
+# version, everything else follows the codename.
+sig_branch_for_file() {
+    local filename=$1
+    local codename=$2
+    local branch
+    case $filename in
+        bootstrap-$codename*.tar.gz) sig_branch_for_codename "$codename" ;;
+        turnkey*.iso)
+            branch=$(sed -En 's|^[a-z0-9-]+-([0-9]+)\.[0-9].*|\1.x|p' <<<"$filename")
+            [[ -n "$branch" ]] || { sig_error "no version in ISO name: $filename"; return 1; }
+            echo "$branch" ;;
+        *.tar.zst) sig_branch_for_codename "$codename" ;;
+        *) sig_error "unexpected filename: $filename"; return 1 ;;
+    esac
+}
+
+sig_upstream_key_file() {
+    echo "tkl-$1-images.asc"
+}
+
+sig_upstream_key_email() {
+    echo "release-$1-images@$SIG_UPSTREAM_KEY_DOMAIN"
+}
+
+sig_upstream_key_url() {
+    local branch=$1
+    local key_file=$2
+    echo "$SIG_UPSTREAM_COMMON_URL/$branch/keys/$key_file"
+}
+
+# The primary fingerprint of the first key in a --with-colons listing.
+sig_colons_fpr() {
+    local fpr
+    fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' <<<"$1")
+    [[ -n "$fpr" ]] || { sig_error "no fingerprint in the key listing"; return 1; }
+    echo "$fpr"
+}
+
+# Every fingerprint of the key, primary first, subkeys after, one per line.
+sig_colons_fprs() {
+    awk -F: '$1 == "fpr" { print $10 }' <<<"$1"
+}
+
+# The first user id of the key, as gpg prints it.
+sig_colons_uid() {
+    local uid
+    uid=$(awk -F: '$1 == "uid" { print $10; exit }' <<<"$1")
+    [[ -n "$uid" ]] || { sig_error "no user id in the key listing"; return 1; }
+    echo "$uid"
+}
+
+# The address inside a user id.
+sig_uid_email() {
+    local email
+    email=$(sed -n 's|^.*<\(.*\)>.*$|\1|p' <<<"$1")
+    [[ -n "$email" ]] || { sig_error "no address in user id '$1'"; return 1; }
+    echo "$email"
+}
+
+# What upstream's generate-signature puts in the sample "Good signature from"
+# line: the tail of the uid record, which on gpg 2.4 is the last colon field
+# and not the user id at all. Kept so that an upstream artifact signed with
+# the upstream key still produces the file upstream publishes, byte for byte
+# (see the published bootstrap-bookworm-amd64.tar.gz.hash, which reads
+# 'Good signature from "0"'). Never used for our own artifacts.
+sig_uid_info_compat() {
+    local colons=$1
+    local email=$2
+    grep "$email" <<<"$colons" | sed "s|^.*::\(.*\):$|\1|"
+}
+
+# The public key algorithm name, from the pub record of a --with-colons
+# listing. The names are the ones gpg prints in a verification message.
+sig_colons_algo() {
+    local algo
+    algo=$(awk -F: '$1 == "pub" { print $4; exit }' <<<"$1")
+    case $algo in
+        1 | 2 | 3) echo "RSA" ;;
+        16) echo "ELG" ;;
+        17) echo "DSA" ;;
+        18) echo "ECDH" ;;
+        19) echo "ECDSA" ;;
+        22) echo "EDDSA" ;;
+        *) sig_error "unknown public key algorithm '$algo'"; return 1 ;;
+    esac
+}
+
+# True when FPR is one of the fingerprints of the key (primary or subkey).
+sig_fpr_known() {
+    local fprs=$1
+    local wanted=${2^^}
+    local fpr
+    for fpr in $fprs; do
+        [[ "${fpr^^}" != "$wanted" ]] || return 0
+    done
+    return 1
+}
+
+# The primary key fingerprint of a good signature, from gpg --status-fd
+# output. VALIDSIG names the signing key first and its primary key last.
+sig_validsig_primary() {
+    local primary
+    primary=$(awk '$2 == "VALIDSIG" { print $NF; exit }' <<<"$1")
+    [[ -n "$primary" ]] || { sig_error "no VALIDSIG line in the gpg status output"; return 1; }
+    echo "$primary"
+}
+
+sig_digest_line() {
+    printf '%s  %s\n' "$1" "$2"
+}
+
+# How the reader gets the key. With a URL, the command that fetches it; with
+# no URL, a line saying the key travels with the release, because a hash file
+# must never point at a key that did not sign it and must not invent a
+# location for a key that is not published yet.
+sig_import_block() {
+    local url=$1
+    if [[ -n "$url" ]]; then
+        echo "    \$ curl $url | gpg --import"
+    else
+        echo "    The release key is published with the release, not at a URL yet."
+        echo "    Import it, then check that the key you imported is the one below:"
+    fi
+}
+
+# The hash file text. Arguments, in order:
+#   filename sha256 sha512 key_email fingerprint uid_info listkeys algo url
+# With the TurnKey values this is upstream's text, byte for byte.
+sig_hash_text() {
+    local filename=$1
+    local sha256=$2
+    local sha512=$3
+    local email=$4
+    local fingerprint=$5
+    local uid_info=$6
+    local listkeys=$7
+    local algo=$8
+    local url=$9
+    cat <<EOF
+To ensure the image has not been corrupted in transmit or tampered with,
+perform the following two steps to cryptographically verify image integrity:
+
+1. Verify the authenticity of this file by checking that it is signed with our
+   GPG release key:
+
+$(sig_import_block "$url")
+    \$ gpg --list-keys --with-fingerprint $email
+$listkeys
+    \$ gpg --verify $filename.hash
+      gpg: Signature made using $algo key ID $fingerprint
+      gpg: Good signature from "$uid_info"
+
+2. Recalculate the image hash and make sure it matches your choice of hash below.
+
+    \$ sha256sum $filename
+      $sha256  $filename
+
+    \$ sha512sum $filename
+      $sha512  $filename
+
+   Note, you can compare hashes automatically::
+
+    \$ sha256sum -c $filename.hash
+      $filename: OK
+
+    \$ sha512sum -c $filename.hash
+      $filename: OK
+
+    Final note, when checking SHAs automatically, please ignore warning noting
+    that some lines are improperly formatted.
+
+EOF
+}
