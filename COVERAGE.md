@@ -18,7 +18,22 @@ Pull request #1 merged on 2026-09-26 (merge commit ad4e8fe) with
 The gate in `.github/workflows/tests.yml` is set to 99, the lowest file
 rounded down, and is only ever raised.
 
-Command, from the repository root with `kcov`, `zstd` and `git` installed:
+## bt-aplinfo added (2026-09-26)
+
+`tests/coverage.sh` now runs `tests/layer` and `tests/aplinfo`, both under
+kcov, and measures four files:
+
+| File | Lines covered | Cover |
+|------|---------------|-------|
+| bin/layer-lib | 183 of 183 | 100 percent |
+| bt-layer | 99 of 100 | 99 percent |
+| bin/aplinfo-lib | 186 of 186 | 100 percent |
+| bt-aplinfo | 47 of 47 | 100 percent |
+
+The gate stays at 99.
+
+Command, from the repository root with `kcov`, `zstd`, `git` and `gpg`
+installed:
 
     tests/coverage.sh            # threshold 95, or COVERAGE_THRESHOLD, or the first argument
 
