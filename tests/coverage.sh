@@ -1,22 +1,25 @@
 #!/bin/bash
-# Line coverage of bin/layer-lib and bt-layer under tests/layer, measured
-# with kcov. Exits 1 when a measured file is below the threshold (default
-# 95), 2 when a tool is missing.
+# Line coverage of the project-authored shell code, measured with kcov:
+#   bin/layer-lib and bt-layer under tests/layer
+#   bin/aplinfo-lib and bt-aplinfo under tests/aplinfo
+# Exits 1 when a measured file is below the threshold (default 95), 2 when a
+# tool is missing.
 #
 #   tests/coverage.sh [THRESHOLD]     (or COVERAGE_THRESHOLD in the environment)
 #
 # COVERAGE_DIR keeps the kcov report (default: a temporary directory).
-# Needs the Debian packages kcov, zstd and git.
+# Needs the Debian packages kcov, zstd, git and gpg.
 #
-# tests/layer runs bt-layer from a scratch copy (it needs its own config
-# directory), so kcov lists the copy next to the checkout: the two files are
-# matched by name and, per name, the executed copy is the one measured.
+# The tests run the bt-* scripts from a scratch copy (they need their own
+# config directory), so kcov lists the copy next to the checkout: the two
+# files are matched by name and, per name, the executed copy is the one
+# measured.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 threshold="${1:-${COVERAGE_THRESHOLD:-95}}"
 
-for tool in kcov zstd git; do
+for tool in kcov zstd git gpg; do
     if ! command -v "$tool" >/dev/null; then
         echo "$tool not found (apt-get install $tool)" >&2
         exit 2
@@ -24,10 +27,13 @@ for tool in kcov zstd git; do
 done
 
 report="${COVERAGE_DIR:-$(mktemp -d)}"
-kcov --include-pattern=/bin/layer-lib,/bt-layer --exclude-pattern=/tests/ \
-    "$report" "$here/layer"
+measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo
+for suite in layer aplinfo; do
+    kcov --include-pattern="$measured" --exclude-pattern=/tests/ \
+        "$report" "$here/$suite"
+done
 
-json="$(find "$report" -mindepth 2 -maxdepth 2 -name coverage.json -not -path "*/kcov-merged/*" | head -1)"
+mapfile -t json < <(find "$report" -mindepth 2 -maxdepth 2 -name coverage.json -not -path "*/kcov-merged/*" | sort)
 
 # kcov writes one line per file:
 #   {"file": "PATH", "percent_covered": "P", "covered_lines": "C", "total_lines": "T"},
@@ -55,4 +61,4 @@ awk -F'"' -v threshold="$threshold" '
             print "coverage below threshold (report: '"$report"')" > "/dev/stderr"
         }
         exit low
-    }' "$json"
+    }' "${json[@]}"

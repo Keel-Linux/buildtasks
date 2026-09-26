@@ -1,0 +1,362 @@
+#!/bin/bash -e
+# Test bt-aplinfo and bin/aplinfo-lib against scratch directories. The
+# templates are small files with the right names; signing uses a throwaway
+# key generated in a scratch GNUPGHOME.
+#
+# Code paths covered:
+#   aplinfo-lib: aplinfo_template_name (default ext, given ext, unknown ext);
+#     aplinfo_name_ext (known, none); aplinfo_ext_known;
+#     aplinfo_parse_template_name (zst, gz, plain tar, hyphenated app, bad
+#     names); aplinfo_location (trailing slash, none, IPv6 host, bad scheme);
+#     aplinfo_sha512 (no sidecar, matching sidecar, stale sidecar, missing
+#     file); aplinfo_product_dir (app, keel-app, none);
+#     aplinfo_changelog_version (ok, bad first line, missing);
+#     aplinfo_description (pve-description with and without continuation,
+#     README.rst title, neither, empty); aplinfo_record_render (ok, wrong
+#     argc); aplinfo_record_field; aplinfo_record_validate (ok, missing file,
+#     blank line, missing field, bad Type, bad Version, short sha512, bad
+#     Location extension, no continuation); aplinfo_assemble (one, many,
+#     none, invalid); aplinfo_gzip (ok, missing); aplinfo_sign (unsigned
+#     warning removes stale .asc, signed, bad key, missing file);
+#     aplinfo_parse_args (help, defaults, url, output, short options, no
+#     template, option without value, unknown option).
+#   bt-aplinfo: --help; usage error; missing config; missing BT_PRODUCTS;
+#     bad template name; missing template; stale sidecar; no product dir;
+#     no description; bad base URL; unsigned run with two templates, default
+#     output, changelog mismatch warning, no changelog warning; signed run
+#     with -u and -o, verified with sqv or gpg; parse check of the index.
+
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $0
+Test bt-aplinfo and bin/aplinfo-lib without a build host
+EOF
+exit 1
+}
+
+[[ "$1" != "-h" ]] && [[ "$1" != "--help" ]] || usage
+
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+source "$BT/bin/aplinfo-lib"
+
+tmp=$(mktemp -d)
+export GNUPGHOME=$tmp/gnupg
+cleanup() {
+    gpgconf --kill gpg-agent 2>/dev/null || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+expect_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
+
+assert_eq() {
+    local label=$1
+    local got=$2
+    local want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+assert_file() {
+    [[ -f "$1" ]] || fatal "missing file: $1"
+}
+
+# A record with every field, to be damaged by the validation tests.
+write_record() {
+    aplinfo_record_render core 19.1-1 debian-13 amd64 \
+        "https://[2001:db8::1]/pve/debian-13-keel-core_19.1-1_amd64.tar.zst" \
+        "$(printf 'a%.0s' {1..128})" "Keel Core" "Keel Core - Debian 13 with batteries included" > "$1"
+}
+
+# The record TurnKey publishes (docs/proxmox-distribution.md), keys only.
+TURNKEY_FIELDS="Package Version Type OS Section Architecture Location Infopage ManageUrl sha512sum Description"
+
+info "1: aplinfo_template_name and aplinfo_name_ext"
+assert_eq name-default "$(aplinfo_template_name core 19.1-1 amd64)" \
+    debian-13-keel-core_19.1-1_amd64.tar.zst
+assert_eq name-gz "$(aplinfo_template_name lamp 19.1-2 arm64 tar.gz)" \
+    debian-13-keel-lamp_19.1-2_arm64.tar.gz
+expect_fail name-badext aplinfo_template_name core 19.1-1 amd64 tgz
+assert_eq name-ext "$(aplinfo_name_ext x.tar.zst)" tar.zst
+assert_eq name-ext-tar "$(aplinfo_name_ext x.tar)" tar
+expect_fail name-ext-none aplinfo_name_ext x.squashfs
+aplinfo_ext_known tar.xz || fatal "tar.xz should be known"
+
+info "2: aplinfo_parse_template_name"
+assert_eq parse-zst "$(aplinfo_parse_template_name /x/debian-13-keel-core_19.1-1_amd64.tar.zst)" \
+    "debian-13 core 19.1-1 amd64 tar.zst"
+assert_eq parse-gz "$(aplinfo_parse_template_name debian-13-keel-nginx-php-fastcgi_19.1-3_arm64.tar.gz)" \
+    "debian-13 nginx-php-fastcgi 19.1-3 arm64 tar.gz"
+assert_eq parse-tar "$(aplinfo_parse_template_name debian-13-keel-lamp_19.1-1_amd64.tar)" \
+    "debian-13 lamp 19.1-1 amd64 tar"
+for bad in core.tar.zst debian-13-turnkey-core_19.1-1_amd64.tar.zst \
+        debian-13-keel-core_19.1_amd64.tar.zst debian-13-keel-core_19.1-1_amd64.tgz \
+        debian-13-keel-core_19.1-1_amd64.tar.zst.sha512; do
+    expect_fail "parse-bad $bad" aplinfo_parse_template_name "$bad"
+done
+
+info "3: aplinfo_location"
+assert_eq location-slash "$(aplinfo_location https://releases.keellinux.org/pve/ a.tar.zst)" \
+    https://releases.keellinux.org/pve/a.tar.zst
+assert_eq location-noslash "$(aplinfo_location https://releases.keellinux.org/pve a.tar.zst)" \
+    https://releases.keellinux.org/pve/a.tar.zst
+assert_eq location-ipv6 "$(aplinfo_location "http://[2001:db8::1]:8080/pve" a.tar.zst)" \
+    "http://[2001:db8::1]:8080/pve/a.tar.zst"
+expect_fail location-scheme aplinfo_location ftp://x/ a.tar.zst
+expect_fail location-noscheme aplinfo_location releases.keellinux.org a.tar.zst
+
+info "4: aplinfo_sha512"
+templates=$tmp/templates
+mkdir -p "$templates"
+core=$templates/debian-13-keel-core_19.1-1_amd64.tar.zst
+lamp=$templates/debian-13-keel-lamp_19.1-1_amd64.tar.zst
+echo core-rootfs > "$core"
+echo lamp-rootfs > "$lamp"
+want=$(sha512sum "$core" | cut -d ' ' -f 1)
+assert_eq sha512-nosidecar "$(aplinfo_sha512 "$core")" "$want"
+echo "$want  $(basename "$core")" > "$core.sha512"
+assert_eq sha512-sidecar "$(aplinfo_sha512 "$core")" "$want"
+echo "$(printf 'b%.0s' {1..128})  $(basename "$lamp")" > "$lamp.sha512"
+expect_fail sha512-stale aplinfo_sha512 "$lamp"
+rm "$lamp.sha512"
+expect_fail sha512-missing aplinfo_sha512 "$templates/nothere.tar.zst"
+
+info "5: aplinfo_product_dir"
+products=$tmp/products
+mkdir -p "$products/core" "$products/keel-lamp"
+assert_eq product-plain "$(aplinfo_product_dir "$products" core)" "$products/core"
+assert_eq product-prefixed "$(aplinfo_product_dir "$products" lamp)" "$products/keel-lamp"
+expect_fail product-none aplinfo_product_dir "$products" wordpress
+
+info "6: aplinfo_changelog_version"
+printf 'keel-core-19.1 (1) keel; urgency=low\n\n  * First Keel release.\n' > "$products/core/changelog"
+assert_eq changelog-version "$(aplinfo_changelog_version "$products/core/changelog")" 19.1-1
+printf 'turnkey-lamp-19.0rc1 (2) turnkey; urgency=low\n' > "$products/keel-lamp/changelog"
+assert_eq changelog-rc "$(aplinfo_changelog_version "$products/keel-lamp/changelog")" 19.0rc1-2
+printf 'no version here\n' > "$tmp/badchangelog"
+expect_fail changelog-bad aplinfo_changelog_version "$tmp/badchangelog"
+expect_fail changelog-missing aplinfo_changelog_version "$tmp/nochangelog"
+
+info "7: aplinfo_description"
+printf 'Keel Core\nDebian 13 with batteries\nincluded.\n' > "$products/core/pve-description"
+assert_eq desc-file "$(aplinfo_description "$products/core" | tr '\n' '|')" \
+    "Keel Core|Debian 13 with batteries included.|"
+printf 'Keel Core\n' > "$products/core/pve-description"
+assert_eq desc-file-short "$(aplinfo_description "$products/core" | tr '\n' '|')" \
+    "Keel Core|Keel Core|"
+rm "$products/core/pve-description"
+printf 'Keel LAMP - Apache, MariaDB and PHP  \n=====\n' > "$products/keel-lamp/README.rst"
+assert_eq desc-readme "$(aplinfo_description "$products/keel-lamp" | tr '\n' '|')" \
+    "Keel LAMP|Keel LAMP - Apache, MariaDB and PHP|"
+expect_fail desc-none aplinfo_description "$products/core"
+mkdir -p "$tmp/emptydesc"
+printf '\n' > "$tmp/emptydesc/pve-description"
+expect_fail desc-empty aplinfo_description "$tmp/emptydesc"
+
+info "8: aplinfo_record_render and aplinfo_record_field"
+record=$tmp/record
+write_record "$record"
+assert_eq render-fields "$(cut -d: -f1 "$record" | grep -v '^ ' | tr '\n' ' ')" "$TURNKEY_FIELDS "
+assert_eq render-package "$(aplinfo_record_field "$record" Package)" keel-core
+assert_eq render-type "$(aplinfo_record_field "$record" Type)" lxc
+assert_eq render-os "$(aplinfo_record_field "$record" OS)" debian-13
+assert_eq render-section "$(aplinfo_record_field "$record" Section)" keellinux
+assert_eq render-infopage "$(aplinfo_record_field "$record" Infopage)" https://keellinux.org/core
+assert_eq render-manage "$(aplinfo_record_field "$record" ManageUrl)" "http://__IPADDRESS__/"
+assert_eq render-continuation "$(tail -n 1 "$record")" " Keel Core - Debian 13 with batteries included"
+assert_eq render-lines "$(wc -l < "$record")" 12
+expect_fail render-argc aplinfo_record_render core 19.1-1
+
+info "9: aplinfo_record_validate"
+aplinfo_record_validate "$record"
+expect_fail validate-missing aplinfo_record_validate "$tmp/norecord"
+damaged=$tmp/damaged
+write_record "$damaged"; echo >> "$damaged"
+expect_fail validate-blank aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i '/^Infopage:/d' "$damaged"
+expect_fail validate-nofield aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i 's/^Type: lxc/Type: openvz/' "$damaged"
+expect_fail validate-type aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i 's/^Version: .*/Version: 19.1/' "$damaged"
+expect_fail validate-version aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i 's/^sha512sum: .*/sha512sum: abc123/' "$damaged"
+expect_fail validate-sha512 aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i 's/\.tar\.zst$/.squashfs/' "$damaged"
+expect_fail validate-location aplinfo_record_validate "$damaged"
+write_record "$damaged"; sed -i '$d' "$damaged"
+expect_fail validate-continuation aplinfo_record_validate "$damaged"
+
+info "10: aplinfo_assemble"
+second=$tmp/record2
+aplinfo_record_render lamp 19.1-1 debian-13 amd64 \
+    "https://releases.keellinux.org/pve/debian-13-keel-lamp_19.1-1_amd64.tar.zst" \
+    "$(printf 'c%.0s' {1..128})" "Keel LAMP" "Keel LAMP - Apache, MariaDB and PHP" > "$second"
+assert_eq assemble-one "$(aplinfo_assemble "$record" | md5sum)" "$(md5sum < "$record")"
+index=$tmp/aplinfo.dat
+aplinfo_assemble "$record" "$second" > "$index"
+assert_eq assemble-lines "$(wc -l < "$index")" 25
+assert_eq assemble-blank "$(sed -n '13p' "$index")" ""
+assert_eq assemble-records "$(grep -c '^Package:' "$index")" 2
+expect_fail assemble-none aplinfo_assemble
+expect_fail assemble-invalid aplinfo_assemble "$record" "$damaged"
+
+info "11: aplinfo_gzip"
+aplinfo_gzip "$index"
+assert_file "$index.gz"
+cmp -s "$index" <(gzip -dc "$index.gz") || fatal "gzip round trip differs"
+cp "$index.gz" "$tmp/first.gz"
+touch -d @1234567890 "$index"
+aplinfo_gzip "$index"
+cmp -s "$tmp/first.gz" "$index.gz" || fatal "gzip output depends on the mtime"
+expect_fail gzip-missing aplinfo_gzip "$tmp/nothere.dat"
+
+info "12: aplinfo_sign"
+mkdir -p -m 700 "$GNUPGHOME"
+gpg --batch --quiet --passphrase '' --quick-generate-key 'Keel Test <test@[2001:db8::1]>' ed25519 sign 0 2>/dev/null
+keyid=$(gpg --list-keys --with-colons 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')
+[[ -n "$keyid" ]] || fatal "no throwaway key generated"
+gpg --armor --export "$keyid" > "$tmp/pub.asc" 2>/dev/null
+echo stale > "$index.asc"
+out=$(aplinfo_sign "$index" "")
+grep -q '^WARNING.*BT_GPGKEY not set' <<<"$out" || fatal "unsigned path gave no warning: $out"
+grep -q 'pveam refuses' <<<"$out" || fatal "warning does not say why it matters"
+[[ ! -e "$index.asc" ]] || fatal "stale .asc kept on the unsigned path"
+assert_eq sign-path "$(aplinfo_sign "$index" "$keyid")" "$index.asc"
+assert_file "$index.asc"
+grep -q 'BEGIN PGP SIGNATURE' "$index.asc" || fatal ".asc is not armored"
+if command -v sqv >/dev/null; then
+    sqv --keyring "$tmp/pub.asc" "$index.asc" "$index" >/dev/null || fatal "sqv rejects the signature"
+else
+    gpg --verify "$index.asc" "$index" 2>/dev/null || fatal "gpg rejects the signature"
+fi
+expect_fail sign-badkey aplinfo_sign "$index" DEADBEEFDEADBEEF
+expect_fail sign-missing aplinfo_sign "$tmp/nothere.dat" "$keyid"
+
+info "13: aplinfo_parse_args"
+aplinfo_parse_args --help
+assert_eq args-help "$APLINFO_HELP" yes
+aplinfo_parse_args a.tar.zst b.tar.zst
+assert_eq args-default "$APLINFO_URL|$APLINFO_OUTPUT|${APLINFO_TEMPLATES[*]}" \
+    "https://releases.keellinux.org/pve/||a.tar.zst b.tar.zst"
+aplinfo_parse_args --url "http://[2001:db8::1]/pve" --output /out a.tar.zst
+assert_eq args-long "$APLINFO_URL|$APLINFO_OUTPUT|${APLINFO_TEMPLATES[*]}" \
+    "http://[2001:db8::1]/pve|/out|a.tar.zst"
+aplinfo_parse_args a.tar.zst -u https://x/ -o /o
+assert_eq args-short "$APLINFO_URL|$APLINFO_OUTPUT|${APLINFO_TEMPLATES[*]}" "https://x/|/o|a.tar.zst"
+for bad in "" "--url" "a.tar.zst --output" "--bogus a.tar.zst" "-u https://x/"; do
+    if aplinfo_parse_args $bad 2>/dev/null; then
+        fatal "parse_args should have failed on '$bad'"
+    fi
+    [[ -n "$APLINFO_ERROR" ]] || fatal "parse_args gave no error for '$bad'"
+done
+
+info "14: bt-aplinfo setup (scratch copy)"
+sbt=$tmp/bt
+mkdir -p "$sbt/bin" "$sbt/config" "$tmp/builds"
+cp "$BT/bt-aplinfo" "$sbt/bt-aplinfo"
+cp "$BT/bin/aplinfo-lib" "$sbt/bin/aplinfo-lib"
+cat > "$sbt/config/common.cfg" <<EOF
+export BT_BUILDS=$tmp/builds
+export BT_PRODUCTS=$products
+EOF
+printf 'Keel Core\nDebian 13 with batteries included.\n' > "$products/core/pve-description"
+unset BT_GPGKEY
+
+info "15: bt-aplinfo usage and early failures"
+"$sbt/bt-aplinfo" --help | grep -q '^Syntax:' || fatal "help text missing"
+expect_fail no-args "$sbt/bt-aplinfo"
+expect_fail bad-option "$sbt/bt-aplinfo" --bogus "$core"
+mv "$sbt/config/common.cfg" "$sbt/config/common.cfg.off"
+expect_fail no-config "$sbt/bt-aplinfo" "$core"
+mv "$sbt/config/common.cfg.off" "$sbt/config/common.cfg"
+cp "$sbt/config/common.cfg" "$sbt/config/common.cfg.full"
+echo "export BT_BUILDS=$tmp/builds" > "$sbt/config/common.cfg"
+expect_fail no-products "$sbt/bt-aplinfo" "$core"
+echo "export BT_PRODUCTS=$products" > "$sbt/config/common.cfg"
+expect_fail no-builds "$sbt/bt-aplinfo" "$core"
+mv "$sbt/config/common.cfg.full" "$sbt/config/common.cfg"
+expect_fail bad-url "$sbt/bt-aplinfo" -u ftp://x/ "$core"
+echo x > "$templates/core.tar.zst"
+expect_fail bad-name "$sbt/bt-aplinfo" "$templates/core.tar.zst"
+expect_fail no-template "$sbt/bt-aplinfo" "$templates/debian-13-keel-core_19.1-2_amd64.tar.zst"
+echo "$(printf 'b%.0s' {1..128})  x" > "$lamp.sha512"
+expect_fail stale-sidecar "$sbt/bt-aplinfo" "$lamp"
+rm "$lamp.sha512"
+wp=$templates/debian-13-keel-wordpress_19.1-1_amd64.tar.zst
+echo wp > "$wp"
+expect_fail no-product "$sbt/bt-aplinfo" "$wp"
+mkdir -p "$products/wordpress"
+expect_fail no-description "$sbt/bt-aplinfo" "$wp"
+[[ ! -e "$tmp/builds/aplinfo/aplinfo.dat" ]] || fatal "index written by a failed run"
+
+info "16: bt-aplinfo unsigned, default output, two templates"
+rm "$products/keel-lamp/changelog"
+out=$("$sbt/bt-aplinfo" "$core" "$lamp")
+index=$tmp/builds/aplinfo/aplinfo.dat
+assert_file "$index"
+assert_file "$index.gz"
+[[ ! -e "$index.asc" ]] || fatal ".asc written without BT_GPGKEY"
+grep -q 'WARNING.*BT_GPGKEY not set' <<<"$out" || fatal "expected the unsigned warning"
+grep -q 'WARNING.*lamp: no readable changelog' <<<"$out" || fatal "expected the changelog warning"
+grep -q 'INFO.*2 records' <<<"$out" || fatal "expected two records: $out"
+assert_eq run-records "$(grep -c '^Package:' "$index")" 2
+assert_eq run-location "$(sed -n 's/^Location: //p' "$index" | head -n 1)" \
+    "https://releases.keellinux.org/pve/debian-13-keel-core_19.1-1_amd64.tar.zst"
+assert_eq run-sha512 "$(sed -n 's/^sha512sum: //p' "$index" | head -n 1)" \
+    "$(sha512sum "$core" | cut -d ' ' -f 1)"
+assert_eq run-desc "$(sed -n 's/^Description: //p' "$index" | tr '\n' '|')" "Keel Core|Keel LAMP|"
+printf 'keel-core-19.0 (1) keel; urgency=low\n' > "$products/core/changelog"
+out=$("$sbt/bt-aplinfo" "$core")
+grep -q 'WARNING.*core: template is 19.1-1 but the changelog says 19.0-1' <<<"$out" \
+    || fatal "expected the version mismatch warning"
+
+info "17: bt-aplinfo signed with -u and -o"
+out=$(BT_GPGKEY=$keyid "$sbt/bt-aplinfo" -u "http://[2001:db8::1]/pve" -o "$tmp/out" "$core" "$lamp")
+index=$tmp/out/aplinfo.dat
+assert_file "$index"
+assert_file "$index.gz"
+assert_file "$index.asc"
+grep -q "INFO.*signing $index with $keyid" <<<"$out" || fatal "signing not reported"
+grep -q "^$index.asc$" <<<"$out" || fatal "signature path not printed"
+! grep -q 'WARNING.*BT_GPGKEY' <<<"$out" || fatal "unsigned warning on a signed run"
+assert_eq signed-location "$(sed -n 's/^Location: //p' "$index" | tail -n 1)" \
+    "http://[2001:db8::1]/pve/debian-13-keel-lamp_19.1-1_amd64.tar.zst"
+if command -v sqv >/dev/null; then
+    sqv --keyring "$tmp/pub.asc" "$index.asc" "$index" >/dev/null || fatal "sqv rejects the index signature"
+else
+    gpg --verify "$index.asc" "$index" 2>/dev/null || fatal "gpg rejects the index signature"
+fi
+cmp -s "$index" <(gzip -dc "$index.gz") || fatal "the .gz does not unpack to the index"
+
+info "18: parse check, as pveam reads the file"
+# Records split on blank lines; every key pveam reads present in every
+# record, in the TurnKey order; continuation lines start with a space.
+count=0
+while IFS= read -r -d '' rec || [[ -n "$rec" ]]; do
+    [[ -n "$rec" ]] || continue
+    count=$((count + 1))
+    for key in Package Version Type OS Section Architecture Location sha512sum Description Infopage; do
+        grep -q "^$key: [^ ]" <<<"$rec" || fatal "record $count lacks $key"
+    done
+    assert_eq "record $count order" "$(grep -v '^ ' <<<"$rec" | cut -d: -f1 | tr '\n' ' ')" \
+        "$TURNKEY_FIELDS "
+    assert_eq "record $count type" "$(sed -n 's/^Type: //p' <<<"$rec")" lxc
+    grep -q '^ [^ ]' <<<"$rec" || fatal "record $count has no continuation line"
+    version=$(sed -n 's/^Version: //p' <<<"$rec")
+    [[ "$version" =~ ^[0-9][A-Za-z0-9.+:~-]*(-[0-9]+)?$ ]] || fatal "record $count version '$version'"
+    location=$(sed -n 's/^Location: //p' <<<"$rec")
+    [[ "$location" =~ \.tar(\.(gz|xz|zst|bz2))?$ ]] || fatal "record $count location '$location'"
+done < <(awk -v RS= -v ORS='\0' '{print}' "$index")
+assert_eq parsed-records "$count" 2
+
+echo
+info "all tests passed"
