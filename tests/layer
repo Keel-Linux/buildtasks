@@ -2,12 +2,13 @@
 # Test bt-layer and bin/layer-lib against scratch directories. Nothing is
 # built: products are fake Makefiles, fab and the signature helper are stubs.
 #
-# Code paths covered (40 of 40):
+# Code paths covered (42 of 42):
 #   layer-lib: layer_kind (rootfs, delta); layer_altstrap_path; layer_epoch
 #     (env, env invalid, git fallback, no git); layer_git_commit (git, none);
 #     layer_make_var (ok, failure); layer_words_has; layer_words_minus;
 #     layer_child_conf (stack on core with ssl ciphers, app on stack, no
-#     turnkey.d); layer_child_overlays; layer_manifest_render (ok, odd args,
+#     turnkey.d, overlay carrying the ciphers mark, overlay without it);
+#     layer_needs_ssl_ciphers; layer_child_overlays; layer_manifest_render (ok, odd args,
 #     bad key); layer_manifest_get (ok, missing file, missing key);
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
 #     layer_audit_packages (clean, unconfigured package);
@@ -156,6 +157,17 @@ assert_eq child-conf-stack "$(layer_child_conf "$lamp_conf" "$core_conf" "$conf_
 assert_eq child-conf-app "$(layer_child_conf "$wp_conf" "$lamp_conf" "$conf_path")" \
     "turnkey.d/hostname apache-credit php"
 assert_eq child-conf-plain "$(layer_child_conf "a b" "a" "$conf_path")" "b"
+overlays_path=$tmp/common/overlays
+mkdir -p "$overlays_path/nginx/etc/nginx/snippets" "$overlays_path/plain"
+echo "ssl_ciphers 'ZZ_SSL_CIPHERS';" > "$overlays_path/nginx/etc/nginx/snippets/ssl.conf"
+echo 'x' > "$overlays_path/plain/file"
+nginx_conf="turnkey.d nginx"
+assert_eq child-conf-overlay-mark "$(layer_child_conf "$nginx_conf" "$core_conf" "$conf_path" \
+    "$overlays_path" "turnkey.d/tkl-bashlib nginx")" \
+    "turnkey.d/hostname turnkey.d/zz-ssl-ciphers nginx"
+assert_eq child-conf-overlay-plain "$(layer_child_conf "$nginx_conf" "$core_conf" "$conf_path" \
+    "$overlays_path" "turnkey.d/tkl-bashlib plain")" \
+    "turnkey.d/hostname nginx"
 
 info "8: layer_child_overlays"
 assert_eq child-overlays "$(layer_child_overlays "turnkey.d apache php" "turnkey.d")" \

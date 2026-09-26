@@ -112,20 +112,43 @@ layer_words_minus() {
     echo "${out[*]}"
 }
 
+# layer_needs_ssl_ciphers CONF_PATH CHILD_CONF OVERLAYS_PATH CHILD_OVERLAYS:
+# true when a conf script the child runs reads the cipher list written by
+# zz-ssl-ciphers, or when an overlay the child applies carries the mark it
+# replaces (nginx keeps it in snippets/ssl.conf, not in a conf script).
+layer_needs_ssl_ciphers() {
+    local conf_path=$1
+    local child_conf=$2
+    local overlays_path=$3
+    local child_overlays=$4
+    local conf overlay
+    for conf in $child_conf; do
+        if grep -qs "$LAYER_SSL_CIPHERS_MARK" "$conf_path/$conf"; then
+            return 0
+        fi
+    done
+    for overlay in $child_overlays; do
+        if [[ -d "$overlays_path/$overlay" ]] \
+            && grep -rqs "$LAYER_SSL_CIPHERS_MARK" "$overlays_path/$overlay"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 layer_child_conf() {
     local full=$1
     local parent=$2
     local conf_path=$3
+    local overlays_path=${4:-}
+    local child_overlays=${5:-}
     local child out=() conf
     child=$(layer_words_minus "$full" "$parent")
     if layer_words_has "$full" turnkey.d; then
         out+=(turnkey.d/hostname)
-        for conf in $child; do
-            if grep -qs "$LAYER_SSL_CIPHERS_MARK" "$conf_path/$conf"; then
-                out+=("$LAYER_SSL_CIPHERS_CONF")
-                break
-            fi
-        done
+        if layer_needs_ssl_ciphers "$conf_path" "$child" "$overlays_path" "$child_overlays"; then
+            out+=("$LAYER_SSL_CIPHERS_CONF")
+        fi
     fi
     for conf in $child; do
         out+=("$conf")
