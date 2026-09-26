@@ -152,12 +152,14 @@ if [[ -z "$LAYER_USE_EXISTING" ]]; then
     make clean </dev/null >"$log" 2>&1 || true
     info "building $layer root.patched (log: $log)"
     started=$(date +%s)
-    make build/stamps/root.patched "${make_args[@]}" </dev/null 2>&1 | tee -a "$log" || true
+    make_rc=0
+    make build/stamps/root.patched "${make_args[@]}" </dev/null 2>&1 | tee -a "$log" || make_rc=$?
     for target in $(layer_umount_targets "$build_dir/root.patched"); do
         warning "unmounting $target left behind by fab-chroot"
         umount -l "$target"
     done
     cleanup
+    [[ $make_rc -eq 0 ]] || fatal "build of $layer failed with status $make_rc - see $log"
     [[ -f "$build_dir/stamps/root.patched" ]] || fatal "build of $layer failed - see $log"
     info "built $layer root.patched in $(( $(date +%s) - started )) s"
 fi

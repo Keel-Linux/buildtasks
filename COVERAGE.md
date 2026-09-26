@@ -44,3 +44,10 @@ installed:
 run under kcov; the other `bt-*` scripts (about 40 shell files) have no
 test. They follow the 0004 treatment when the project touches them, and the
 repository total is remeasured then.
+
+## 2026-09-26: the build audit
+
+`layer_audit_packages` reads the built rootfs's dpkg status and refuses a
+layer that carries an unconfigured or half-installed package, and `bt-layer`
+now treats a non-zero `make` as fatal instead of relying on the stamp alone.
+Both are covered by `tests/layer` (audit clean and audit unconfigured).

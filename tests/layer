@@ -10,6 +10,7 @@
 #     turnkey.d); layer_child_overlays; layer_manifest_render (ok, odd args,
 #     bad key); layer_manifest_get (ok, missing file, missing key);
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
+#     layer_audit_packages (clean, unconfigured package);
 #     layer_check_build (ok, no stamp, not mounted, no upper);
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
 #     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
@@ -178,6 +179,39 @@ assert_eq members-delta "$(layer_tar_members delta /b | tr '\n' ' ')" \
     "-C /b/.deck/root.build/upper . -C /b/.deck/root.patched/upper . "
 expect_fail members-unknown layer_tar_members squashfs /b
 
+info "10b: layer_audit_packages"
+audit_root=$tmp/auditfs
+mkdir -p "$audit_root/var/lib/dpkg"
+cat > "$audit_root/var/lib/dpkg/status" << 'STATUS'
+Package: bash
+Status: install ok installed
+Version: 5.2
+
+Package: confconsole
+Status: install ok unpacked
+Version: 2.2.3+keel1
+
+STATUS
+expect_fail audit-unconfigured layer_audit_packages "$audit_root"
+cat > "$audit_root/var/lib/dpkg/status" << 'STATUS'
+Package: bash
+Status: install ok installed
+Version: 5.2
+
+Package: confconsole
+Status: install ok installed
+Version: 2.2.3+keel1
+
+STATUS
+expect_ok audit-clean layer_audit_packages "$audit_root"
+LAYER_DPKG_QUERY=$tmp/no-such-dpkg-query expect_fail audit-no-dpkg layer_audit_packages "$audit_root"
+cat > "$audit_root/var/lib/dpkg/status" << 'STATUS'
+Package: ghost
+Status: unknown ok not-installed
+
+STATUS
+expect_ok audit-unknown-ignored layer_audit_packages "$audit_root"
+
 info "11: layer_check_build"
 build=$tmp/build
 expect_fail check-nostamp layer_check_build rootfs "$build"
@@ -191,6 +225,15 @@ layer_check_build rootfs "$build"
 expect_fail check-noupper layer_check_build delta "$build"
 mkdir -p "$build/.deck/root.build/upper" "$build/.deck/root.patched/upper"
 layer_check_build delta "$build"
+mkdir -p "$build/root.patched/var/lib/dpkg"
+cat > "$build/root.patched/var/lib/dpkg/status" << 'STATUS'
+Package: confconsole
+Status: install ok unpacked
+Version: 2.2.3+keel1
+
+STATUS
+expect_fail check-unconfigured layer_check_build delta "$build"
+rm -f "$build/root.patched/var/lib/dpkg/status"
 
 info "12: layer_hash_size and layer_write_sha256"
 echo foo > "$tmp/foo"

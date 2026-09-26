@@ -215,6 +215,26 @@ layer_tar_members() {
     esac
 }
 
+layer_audit_packages() {
+    local rootfs=$1
+    local broken
+    broken=$(LAYER_DPKG_QUERY=${LAYER_DPKG_QUERY:-dpkg-query}; \
+        command -v "$LAYER_DPKG_QUERY" >/dev/null || exit 3; \
+        "$LAYER_DPKG_QUERY" --admindir="$rootfs/var/lib/dpkg" -f \
+            '${Package} ${Status}\n' -W 2>/dev/null \
+        | awk '$4 != "installed" && $2 != "unknown" { print $1 " (" $2 " " $3 " " $4 ")" }')
+    if [[ $? -eq 3 ]]; then
+        layer_error "dpkg-query not available, cannot audit $rootfs"
+        return 1
+    fi
+    if [[ -n "$broken" ]]; then
+        layer_error "packages left unconfigured or half-installed in $rootfs:"
+        printf '  %s\n' $broken >&2
+        return 1
+    fi
+    return 0
+}
+
 layer_check_build() {
     local kind=$1
     local build_dir=$2
@@ -225,6 +245,9 @@ layer_check_build() {
     fi
     if [[ ! -x "$build_dir/root.patched/bin/bash" ]]; then
         layer_error "$build_dir/root.patched is not a rootfs - is the deck mounted? (make redeck)"
+        return 1
+    fi
+    if ! layer_audit_packages "$build_dir/root.patched"; then
         return 1
     fi
     if [[ "$kind" == delta ]]; then
