@@ -40,7 +40,9 @@ Environment::
     SOURCE_DATE_EPOCH   - mtime of every tarball entry; defaults to the
                           commit time of the product
     BT_GPGKEY           - when set, generate-signature writes a hash file
-                          next to the tarball; when unset a warning is printed
+                          next to the tarball, signed with that key and naming
+                          it; when unset a warning is printed and no hash file
+                          is written
     FAB_PATH            - fab tree (common/, altstraps/)
     RELEASE, FAB_ARCH   - default to the host release and architecture
     BT_DEBUG            - verbose output

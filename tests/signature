@@ -1,42 +1,343 @@
 #!/bin/bash -e
+# Test bin/generate-signature and bin/signature-lib against scratch
+# directories. No project key is involved: the test generates throwaway keys
+# in its own GNUPGHOME under a temporary directory and removes them, and it
+# never touches the network (the one run that fetches a key uses a curl stub).
+#
+# Code paths covered (48 of 48):
+#   signature-lib: sig_branch_for_codename (bookworm, trixie, forky, unknown);
+#     sig_branch_for_file (bootstrap, iso, layer, iso without a version,
+#     unexpected name); sig_upstream_key_file; sig_upstream_key_email;
+#     sig_upstream_key_url; sig_colons_fpr (ok, none); sig_colons_fprs
+#     (primary and subkey); sig_colons_uid (ok, none); sig_uid_email (ok,
+#     none); sig_uid_info_compat; sig_colons_algo (RSA, ELG, DSA, ECDH, ECDSA,
+#     EDDSA, unknown); sig_fpr_known (primary, subkey, lower case, unknown);
+#     sig_validsig_primary (ok, no VALIDSIG); sig_digest_line;
+#     sig_import_block (url, no url); sig_hash_text (with and without a url).
+#   generate-signature: --help; no argument; two files; unknown option;
+#     missing file; no key (digests written, no hash file, stale hash file
+#     removed); no key with --require-signature; unknown BT_GPGKEY;
+#     BT_SIGN_KEY_FPR matching and mismatching; BT_SIGN_KEY_EMAIL override;
+#     RELEASE taken from the host; BT_DEBUG; our own key with no published
+#     URL (signed, verified, read back by bin/signature-verify); key fetched
+#     from BT_SIGN_KEY_URL; published key file that is another key with the
+#     same address; published key file without that address; the upstream key
+#     on a file whose name names no branch; a signing failure leaving no hash
+#     file behind; and the upstream key on an upstream artifact, which must
+#     produce the text of tests/signature-reference byte for byte.
 
-fatal() { echo "FATAL [$(basename $0)]: $@" 1>&2; exit 1; }
-info() { echo "INFO [$(basename $0)]: $@"; }
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
 
 usage() {
 cat<<EOF
 Syntax: $0
-Test signature generation, signing and verification
+Test bin/generate-signature and bin/signature-lib with throwaway keys
 EOF
 exit 1
 }
 
-export BT_BIN=$(dirname $(dirname $(readlink -f $0)))/bin
+[[ "$1" != "-h" ]] && [[ "$1" != "--help" ]] || usage
 
-info "test1: should pass"
-t=$(tempfile)
-echo "foo" > $t
-$BT_BIN/generate-signature $t
-$BT_BIN/signature-sign $t.sig
-$BT_BIN/signature-verify $t $t.sig
-rm $t $t.sig
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+# shellcheck source=bin/signature-lib
+source "$BT/bin/signature-lib"
+GS=$BT/bin/generate-signature
+REFERENCE=$BT/tests/signature-reference
 
-info "test2: should fail (gpg)"
-t=$(tempfile)
-echo "foo" > $t
-$BT_BIN/generate-signature $t
-$BT_BIN/signature-sign $t.sig
-sed -i "s/Turnkey/TurnKey/" $t.sig
-$BT_BIN/signature-verify $t $t.sig && fatal "should have failed (gpg)"
-rm $t $t.sig
+tmp=$(mktemp -d)
+cleanup() {
+    gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
 
-info "test3: should fail (checksum)"
-t=$(tempfile)
-echo "foo" > $t
-$BT_BIN/generate-signature $t
-$BT_BIN/signature-sign $t.sig
-echo "foo" >> $t
-$BT_BIN/signature-verify $t $t.sig && fatal "should have failed (checksum)"
-rm $t $t.sig
+expect_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
 
+expect_ok() {
+    local label=$1
+    shift
+    "$@" >/dev/null 2>&1 || fatal "$label: should have passed"
+}
+
+assert_eq() {
+    local label=$1
+    local got=$2
+    local want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+assert_grep() {
+    local label=$1
+    local pattern=$2
+    local file=$3
+    grep -qF -- "$pattern" "$file" || fatal "$label: '$pattern' not in $file"
+}
+
+refute_grep() {
+    local label=$1
+    local pattern=$2
+    local file=$3
+    ! grep -qF -- "$pattern" "$file" || fatal "$label: '$pattern' is in $file"
+}
+
+assert_file() {
+    [[ -f "$1" ]] || fatal "missing file: $1"
+}
+
+assert_missing() {
+    [[ ! -e "$1" ]] || fatal "should not exist: $1"
+}
+
+# The cleartext of a clearsigned file, exactly as it was signed: the lines
+# between the armor header and the signature, which gpg writes unchanged.
+hash_body() {
+    awk '
+        /^-----BEGIN PGP SIGNATURE-----$/ { if (state == 2) exit }
+        state == 2 { print }
+        state == 1 && /^$/ { state = 2; next }
+        /^-----BEGIN PGP SIGNED MESSAGE-----$/ { state = 1 }
+    ' "$1"
+}
+
+newkey() {
+    local uid=$1
+    local algo=$2
+    gpg --batch --pinentry-mode loopback --passphrase '' --quiet \
+        --quick-generate-key "$uid" "$algo" sign never >/dev/null 2>&1 \
+        || fatal "cannot generate the throwaway key '$uid'"
+}
+
+keyfpr() {
+    gpg --with-colons --list-keys "$1" | awk -F: '$1 == "fpr" { print $10; exit }'
+}
+
+info "1: sig_branch_for_codename and sig_branch_for_file"
+assert_eq branch-bookworm "$(sig_branch_for_codename bookworm)" 18.x
+assert_eq branch-trixie "$(sig_branch_for_codename trixie)" 19.x
+assert_eq branch-forky "$(sig_branch_for_codename forky)" 20.x
+expect_fail branch-unknown sig_branch_for_codename sid
+assert_eq branch-bootstrap "$(sig_branch_for_file bootstrap-trixie-amd64.tar.gz trixie)" 19.x
+assert_eq branch-iso "$(sig_branch_for_file turnkey-core-19.0-trixie-amd64.iso trixie)" 19.x
+assert_eq branch-layer "$(sig_branch_for_file core.tar.zst trixie)" 19.x
+expect_fail branch-iso-noversion sig_branch_for_file turnkey-core.iso trixie
+expect_fail branch-unexpected sig_branch_for_file release-notes.txt trixie
+
+info "2: the upstream defaults"
+assert_eq upstream-file "$(sig_upstream_key_file trixie)" tkl-trixie-images.asc
+assert_eq upstream-email "$(sig_upstream_key_email trixie)" \
+    release-trixie-images@turnkeylinux.org
+assert_eq upstream-url "$(sig_upstream_key_url 19.x tkl-trixie-images.asc)" \
+    https://raw.githubusercontent.com/turnkeylinux/common/19.x/keys/tkl-trixie-images.asc
+
+info "3: reading a gpg --with-colons listing"
+colons=$(cat <<'COLONS'
+tru::1:1790452737:0:3:1:5
+pub:-:4096:1:7761DEBABBCFBA7C:1684713600:2443780800::-:::scESC::::::23::0:
+fpr:::::::::26147592087C0EDE42143B637761DEBABBCFBA7C:
+uid:-::::1684713600::17E924C72E80AAF835ED5A128678F63776717E95::TurnKey GNU/Linux Bookworm Images <release-bookworm-images@turnkeylinux.org>::::::::::0:
+sub:-:4096:1:2A1B3C4D5E6F7A8B:1684713600:2443780800:::::s::::::23:
+fpr:::::::::AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555:
+COLONS
+)
+assert_eq colons-fpr "$(sig_colons_fpr "$colons")" 26147592087C0EDE42143B637761DEBABBCFBA7C
+assert_eq colons-fprs "$(sig_colons_fprs "$colons" | tr '\n' ' ')" \
+    "26147592087C0EDE42143B637761DEBABBCFBA7C AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555 "
+assert_eq colons-uid "$(sig_colons_uid "$colons")" \
+    "TurnKey GNU/Linux Bookworm Images <release-bookworm-images@turnkeylinux.org>"
+assert_eq colons-email "$(sig_uid_email "$(sig_colons_uid "$colons")")" \
+    release-bookworm-images@turnkeylinux.org
+assert_eq colons-algo "$(sig_colons_algo "$colons")" RSA
+expect_fail colons-fpr-none sig_colons_fpr "tru::1:1790452737:0:3:1:5"
+expect_fail colons-uid-none sig_colons_uid "tru::1:1790452737:0:3:1:5"
+expect_fail colons-email-none sig_uid_email "A key with no address"
+assert_eq algo-elg "$(sig_colons_algo 'pub:-:2048:16:X:1:::-:::e::::::23::0:')" ELG
+assert_eq algo-dsa "$(sig_colons_algo 'pub:-:2048:17:X:1:::-:::s::::::23::0:')" DSA
+assert_eq algo-ecdh "$(sig_colons_algo 'pub:-:256:18:X:1:::-:::e::::::23::0:')" ECDH
+assert_eq algo-ecdsa "$(sig_colons_algo 'pub:-:256:19:X:1:::-:::s::::::23::0:')" ECDSA
+assert_eq algo-eddsa "$(sig_colons_algo 'pub:-:255:22:X:1:::-:::scSC::::::23::0:')" EDDSA
+expect_fail algo-unknown sig_colons_algo 'pub:-:255:99:X:1:::-:::s::::::23::0:'
+
+# What upstream's script puts in the sample output line: the tail of the uid
+# record, not the uid. Reproduced for upstream artifacts and nothing else.
+assert_eq uid-compat \
+    "$(sig_uid_info_compat "$colons" release-bookworm-images@turnkeylinux.org)" 0
+
+fprs=$(sig_colons_fprs "$colons")
+expect_ok fpr-primary sig_fpr_known "$fprs" 26147592087C0EDE42143B637761DEBABBCFBA7C
+expect_ok fpr-subkey sig_fpr_known "$fprs" AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555
+expect_ok fpr-lowercase sig_fpr_known "$fprs" 26147592087c0ede42143b637761debabbcfba7c
+expect_fail fpr-unknown sig_fpr_known "$fprs" DEADBEEF00000000000000000000000000000000
+assert_eq validsig "$(sig_validsig_primary '[GNUPG:] VALIDSIG BBBB 2026-09-26 1790452737 0 4 0 22 10 00 26147592087C0EDE42143B637761DEBABBCFBA7C')" \
+    26147592087C0EDE42143B637761DEBABBCFBA7C
+expect_fail validsig-none sig_validsig_primary '[GNUPG:] BADSIG 7761DEBABBCFBA7C nobody'
+assert_eq digest-line "$(sig_digest_line abc123 core.tar.zst)" "abc123  core.tar.zst"
+
+info "4: sig_import_block and sig_hash_text"
+assert_eq import-url "$(sig_import_block https://example.invalid/keyring.asc)" \
+    '    $ curl https://example.invalid/keyring.asc | gpg --import'
+assert_eq import-nourl-lines "$(sig_import_block "" | wc -l)" 2
+sig_import_block "" | grep -q "published with the release" \
+    || fatal "the block without a url does not say where the key comes from"
+text=$tmp/text
+sig_hash_text core.tar.zst SHA256VALUE SHA512VALUE release@keel.invalid FINGERPRINT \
+    "Keel Linux <release@keel.invalid>" "      pub   ed25519" EDDSA "" > "$text"
+assert_grep text-fpr "using EDDSA key ID FINGERPRINT" "$text"
+assert_grep text-uid 'Good signature from "Keel Linux <release@keel.invalid>"' "$text"
+assert_grep text-sha256 "      SHA256VALUE  core.tar.zst" "$text"
+assert_grep text-sha512 "      SHA512VALUE  core.tar.zst" "$text"
+assert_grep text-verify "gpg --verify core.tar.zst.hash" "$text"
+refute_grep text-no-curl "curl" "$text"
+sig_hash_text core.tar.zst SHA256VALUE SHA512VALUE release@keel.invalid FINGERPRINT \
+    "Keel Linux <release@keel.invalid>" "      pub   ed25519" EDDSA \
+    https://example.invalid/keyring.asc > "$text"
+assert_grep text-url "curl https://example.invalid/keyring.asc | gpg --import" "$text"
+
+info "5: throwaway keys and scratch directories"
+export GNUPGHOME=$tmp/gnupg
+mkdir -p "$GNUPGHOME"
+chmod 700 "$GNUPGHOME"
+# Several throwaway keys share one home here, so every gpg run would rebuild
+# the trust database and gpg 2.4.4 exits 2 when a keyring of one key does not
+# hold an ultimately trusted key the database records. The frozen reference
+# script takes no options, so the setting goes where both scripts read it.
+printf 'no-auto-check-trustdb\n' > "$GNUPGHOME/gpg.conf"
+newkey "Keel Linux Test Signing Key <release@test.invalid>" ed25519
+KEEL_FPR=$(keyfpr release@test.invalid)
+[[ -n "$KEEL_FPR" ]] || fatal "the throwaway key has no fingerprint"
+newkey "TurnKey GNU/Linux Release Key <release-trixie-images@turnkeylinux.org>" rsa2048
+TKL_FPR=$(keyfpr release-trixie-images@turnkeylinux.org)
+[[ -n "$TKL_FPR" ]] || fatal "the throwaway upstream key has no fingerprint"
+# A second key with the same address as ours, standing in for a published key
+# file that is not the key doing the signing, and a key whose secret half is
+# missing, so that signing fails after the hash file has been written.
+other=$tmp/gnupg-other
+mkdir -p "$other"
+chmod 700 "$other"
+printf 'no-auto-check-trustdb\n' > "$other/gpg.conf"
+GNUPGHOME=$other newkey "Keel Linux Test Signing Key <release@test.invalid>" ed25519
+IMPOSTOR_FPR=$(GNUPGHOME=$other keyfpr release@test.invalid)
+GNUPGHOME=$other newkey "Keel Linux Public Only <public-only@test.invalid>" ed25519
+PUBONLY_FPR=$(GNUPGHOME=$other keyfpr public-only@test.invalid)
+GNUPGHOME=$other gpg --armor --export "$PUBONLY_FPR" 2>/dev/null | gpg --quiet --import 2>/dev/null
+keys=$tmp/fab/common/keys
+mkdir -p "$keys" "$tmp/work" "$tmp/stubs"
+GNUPGHOME=$other gpg --armor --export "$IMPOSTOR_FPR" > "$keys/impostor.asc" 2>/dev/null
+gpg --armor --export "$TKL_FPR" > "$keys/tkl-trixie-images.asc" 2>/dev/null
+gpg --armor --export "$KEEL_FPR" > "$tmp/keel-archive-keyring.asc" 2>/dev/null
+printf '#!/bin/bash\ncat %q\n' "$tmp/keel-archive-keyring.asc" > "$tmp/stubs/curl"
+printf '#!/bin/bash\necho trixie\n' > "$tmp/stubs/lsb_release"
+chmod 755 "$tmp/stubs"/*
+export FAB_PATH=$tmp/fab
+export RELEASE=debian/trixie
+unset BT_GPGKEY BT_SIGN_KEY_FILE BT_SIGN_KEY_EMAIL BT_SIGN_KEY_URL BT_SIGN_KEY_FPR
+
+info "6: usage and early failures"
+"$GS" --help | grep -q '^Syntax:' || fatal "help text missing"
+expect_fail no-args "$GS"
+expect_fail two-files "$GS" a b
+expect_fail unknown-option "$GS" --sign-everything file
+expect_fail no-such-file "$GS" "$tmp/work/absent.tar.zst"
+
+info "7: no key at all (digests only, never a hash file)"
+f=$tmp/work/core.tar.zst
+echo "a layer" > "$f"
+printf 'this file names a key and signs nothing\n' > "$f.hash"
+out=$("$GS" "$f" 2>&1)
+grep -q "removed $f.hash" <<<"$out" || fatal "the stale hash file was kept"
+grep -q "BT_GPGKEY not set" <<<"$out" || fatal "no warning about the missing key"
+assert_missing "$f.hash"
+assert_file "$f.sha256"
+assert_file "$f.sha512"
+assert_eq digest-sha256 "$(cat "$f.sha256")" "$(sha256sum "$f" | cut -d ' ' -f 1)  core.tar.zst"
+assert_eq digest-sha512 "$(cat "$f.sha512")" "$(sha512sum "$f" | cut -d ' ' -f 1)  core.tar.zst"
+expect_ok digest-sha256-check bash -c "cd '$tmp/work' && sha256sum -c core.tar.zst.sha256"
+expect_ok digest-sha512-check bash -c "cd '$tmp/work' && sha512sum -c core.tar.zst.sha512"
+expect_fail require-signature "$GS" --require-signature "$f"
+assert_missing "$f.hash"
+rm -f "$f.sha256" "$f.sha512"
+
+info "8: our own key, no published URL"
+out=$(BT_GPGKEY=$KEEL_FPR BT_SIGN_KEY_FPR=$KEEL_FPR "$GS" "$f")
+grep -q "is signed by $KEEL_FPR" <<<"$out" || fatal "the signature was not verified"
+assert_file "$f.hash"
+assert_grep hash-signed "BEGIN PGP SIGNED MESSAGE" "$f.hash"
+assert_grep hash-fpr "using EDDSA key ID $KEEL_FPR" "$f.hash"
+assert_grep hash-uid 'Good signature from "Keel Linux Test Signing Key <release@test.invalid>"' "$f.hash"
+assert_grep hash-email "gpg --list-keys --with-fingerprint release@test.invalid" "$f.hash"
+assert_grep hash-published "published with the release" "$f.hash"
+refute_grep hash-no-turnkey "turnkeylinux.org" "$f.hash"
+refute_grep hash-no-url "curl" "$f.hash"
+expect_ok read-back env BT_GPGKEY="$KEEL_FPR" "$BT/bin/signature-verify" "$f" "$f.hash" -f
+gpg --verify "$f.hash" 2>/dev/null || fatal "the hash file does not verify"
+
+info "9: the key fetched from BT_SIGN_KEY_URL"
+rm -f "$f.hash"
+PATH=$tmp/stubs:$PATH BT_GPGKEY=$KEEL_FPR \
+    BT_SIGN_KEY_URL=https://archive.keellinux.org/keel-archive-keyring.asc "$GS" "$f" >/dev/null
+assert_grep hash-url \
+    "curl https://archive.keellinux.org/keel-archive-keyring.asc | gpg --import" "$f.hash"
+refute_grep hash-url-no-note "published with the release" "$f.hash"
+expect_ok read-back-url env BT_GPGKEY="$KEEL_FPR" "$BT/bin/signature-verify" "$f" "$f.hash" -f
+
+info "10: BT_SIGN_KEY_EMAIL, the host release and BT_DEBUG"
+rm -f "$f.hash"
+out=$(env -u RELEASE PATH="$tmp/stubs:$PATH" BT_DEBUG=yes BT_GPGKEY="$KEEL_FPR" \
+    BT_SIGN_KEY_EMAIL=release@test.invalid "$GS" "$f" 2>&1)
+grep -q "is signed by $KEEL_FPR" <<<"$out" || fatal "the debug run did not sign"
+assert_grep hash-email-override \
+    "gpg --list-keys --with-fingerprint release@test.invalid" "$f.hash"
+rm -f "$f.hash"
+
+info "11: every refusal"
+expect_fail unknown-key env BT_GPGKEY=0000000000000000 "$GS" "$f"
+assert_missing "$f.hash"
+expect_fail fpr-mismatch env BT_GPGKEY="$KEEL_FPR" BT_SIGN_KEY_FPR="$IMPOSTOR_FPR" "$GS" "$f"
+assert_missing "$f.hash"
+# The defect this suite exists for: a key that did not sign the file must
+# never be the key the hash file tells the reader to verify with.
+out=$(BT_GPGKEY=$KEEL_FPR BT_SIGN_KEY_FILE=impostor.asc "$GS" "$f" 2>&1 || true)
+grep -q "would name a key that did not sign it" <<<"$out" \
+    || fatal "a published key other than the signing key was accepted: $out"
+assert_missing "$f.hash"
+out=$(BT_GPGKEY=$KEEL_FPR BT_SIGN_KEY_FILE=tkl-trixie-images.asc "$GS" "$f" 2>&1 || true)
+grep -q "holds no key for release@test.invalid" <<<"$out" \
+    || fatal "a published key file without our address was accepted: $out"
+assert_missing "$f.hash"
+notes=$tmp/work/release-notes.txt
+echo notes > "$notes"
+out=$(BT_GPGKEY=$TKL_FPR "$GS" "$notes" 2>&1 || true)
+grep -q "set BT_SIGN_KEY_URL" <<<"$out" || fatal "an unnamed branch was accepted: $out"
+assert_missing "$notes.hash"
+out=$(BT_GPGKEY=$PUBONLY_FPR "$GS" "$f" 2>&1 || true)
+grep -q "removed the unsigned $f.hash" <<<"$out" || fatal "an unsigned hash file was left: $out"
+assert_missing "$f.hash"
+
+info "12: an upstream artifact with the upstream key, byte for byte"
+u=$tmp/work/bootstrap-trixie-amd64.tar.gz
+echo "an upstream bootstrap" > "$u"
+"$REFERENCE" "$u" >/dev/null 2>&1 || fatal "the frozen reference script failed"
+mv "$u.hash" "$tmp/reference.hash"
+BT_GPGKEY=$TKL_FPR "$GS" "$u" >/dev/null
+assert_grep upstream-signed "BEGIN PGP SIGNED MESSAGE" "$u.hash"
+hash_body "$u.hash" > "$tmp/signed-body.hash"
+cmp "$tmp/reference.hash" "$tmp/signed-body.hash" \
+    || fatal "the text differs from the one upstream's script writes"
+assert_grep upstream-url \
+    "curl https://raw.githubusercontent.com/turnkeylinux/common/19.x/keys/tkl-trixie-images.asc" \
+    "$u.hash"
+# The same text through an ISO name, which takes its branch from the version.
+iso=$tmp/work/turnkey-core-19.0-trixie-amd64.iso
+echo iso > "$iso"
+BT_GPGKEY=$TKL_FPR "$GS" "$iso" >/dev/null
+assert_grep upstream-iso-url "common/19.x/keys/tkl-trixie-images.asc" "$iso.hash"
+
+echo
 info "all tests passed"
