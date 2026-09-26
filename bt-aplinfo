@@ -1,0 +1,118 @@
+#!/bin/bash -e
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+
+[[ -z "$BT_DEBUG" ]] || set -x
+set -o pipefail
+
+APP=$(basename "$0")
+fatal() { echo "FATAL [$APP]: $*" 1>&2; exit 1; }
+warning() { echo "WARNING [$APP]: $*"; }
+info() { echo "INFO [$APP]: $*"; }
+
+usage() {
+    cat<<EOF
+Syntax: $APP [-u|--url BASE_URL] [-o|--output DIR] template...
+Writes the Proxmox appliance index (aplinfo.dat) for the given templates
+
+Arguments::
+
+    template            - LXC template produced by 'keel assemble', named
+                          debian-13-keel-<app>_<version>-<revision>_<arch>.tar.zst
+                          (a .sha512 file next to it is checked when present)
+
+Options::
+
+    -u|--url BASE_URL   - where the templates will be served; each Location
+                          is BASE_URL/<template file name>
+                          (default: https://releases.keellinux.org/pve/)
+    -o|--output DIR     - where to write the index
+                          (default: \$BT_BUILDS/aplinfo)
+
+Environment::
+
+    BT_PRODUCTS         - product directories; the Description of <app> comes
+                          from \$BT_PRODUCTS/<app>/pve-description or the
+                          README.rst title, and the version is checked
+                          against the changelog
+    BT_GPGKEY           - when set, aplinfo.dat.asc is written with this key;
+                          when unset a warning is printed, since pveam
+                          refuses an index without a signature
+    BT_DEBUG            - verbose output
+
+Output, in DIR::
+
+    aplinfo.dat         the index, one record per template
+    aplinfo.dat.gz      what pveam downloads (gzip -n, reproducible)
+    aplinfo.dat.asc     detached signature over aplinfo.dat, when signed
+
+EOF
+    if [[ "$#" -ne 0 ]]; then
+        echo "Error: $*"
+        exit 1
+    fi
+    exit
+}
+
+link=$(readlink -f "$0")
+BT=$(dirname "$link")
+export BT
+export BT_CONFIG="$BT/config"
+if [[ ! -f "$BT_CONFIG/common.cfg" ]]; then
+    fatal "$BT_CONFIG/common.cfg not found - see $BT/config.example"
+fi
+# shellcheck source=config.example/common.cfg
+source "$BT_CONFIG/common.cfg"
+# shellcheck source=bin/aplinfo-lib
+source "$BT/bin/aplinfo-lib"
+
+aplinfo_parse_args "$@" || usage "$APLINFO_ERROR"
+[[ -z "$APLINFO_HELP" ]] || usage
+
+[[ -n "$BT_PRODUCTS" ]] || fatal "BT_PRODUCTS not set"
+[[ -n "$BT_BUILDS" ]] || fatal "BT_BUILDS not set"
+out=${APLINFO_OUTPUT:-$BT_BUILDS/aplinfo}
+aplinfo_location "$APLINFO_URL" "" >/dev/null || fatal "unusable base URL"
+
+records=$(mktemp -d)
+trap 'rm -rf "$records"' EXIT
+record_files=()
+
+for template in "${APLINFO_TEMPLATES[@]}"; do
+    read -r os app version arch _ < <(aplinfo_parse_template_name "$template") \
+        || fatal "cannot index $template"
+    sha512=$(aplinfo_sha512 "$template") || fatal "cannot hash $template"
+    product_dir=$(aplinfo_product_dir "$BT_PRODUCTS" "$app") \
+        || fatal "no description source for $app"
+    if changelog_version=$(aplinfo_changelog_version "$product_dir/changelog" 2>/dev/null); then
+        if [[ "$changelog_version" != "$version" ]]; then
+            warning "$app: template is $version but the changelog says $changelog_version"
+        fi
+    else
+        warning "$app: no readable changelog in $product_dir, version $version not cross-checked"
+    fi
+    mapfile -t description < <(aplinfo_description "$product_dir")
+    [[ ${#description[@]} -eq 2 ]] || fatal "no description for $app"
+    location=$(aplinfo_location "$APLINFO_URL" "$(basename "$template")")
+    record=$records/$app
+    aplinfo_record_render "$app" "$version" "$os" "$arch" "$location" "$sha512" \
+        "${description[0]}" "${description[1]}" > "$record"
+    aplinfo_record_validate "$record" || fatal "record for $app is not valid"
+    record_files+=("$record")
+    info "$app $version $arch: $location"
+done
+
+mkdir -p "$out"
+index=$out/$APLINFO_FILE
+aplinfo_assemble "${record_files[@]}" > "$index" || fatal "cannot assemble $index"
+aplinfo_gzip "$index" || fatal "cannot gzip $index"
+info "wrote $index and $index.gz (${#record_files[@]} records)"
+
+[[ -z "$BT_GPGKEY" ]] || info "signing $index with $BT_GPGKEY"
+aplinfo_sign "$index" "$BT_GPGKEY" || fatal "cannot sign $index"
