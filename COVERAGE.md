@@ -70,3 +70,24 @@ rewritten with throwaway keys generated inside the test, is the third suite
 The gate stays at 99. The stub `tests/layer` puts where `bt-layer` expects
 `generate-signature` is excluded by its scratch path, so the stub's 100
 percent cannot stand in for the real script's number.
+
+## 2026-09-27: the cipher list of a child layer
+
+`layer_needs_ssl_ciphers` decides whether a child layer has to run
+`turnkey.d/zz-ssl-ciphers`, and it now looks at the overlays the child
+applies as well as the conf scripts it runs: nginx keeps the `ZZ_SSL_CIPHERS`
+mark in `overlays/nginx/etc/nginx/snippets/ssl.conf`, not in a conf script,
+so a layer built on an nginx stack shipped the literal mark as its cipher
+list and nginx refused to start. Two cases in `tests/layer`, an overlay that
+carries the mark and one that does not.
+
+| File | Lines covered | Cover |
+|------|---------------|-------|
+| bin/layer-lib | 207 of 208 | 99 percent |
+| bt-layer | 101 of 102 | 99 percent |
+| bin/aplinfo-lib | 186 of 186 | 100 percent |
+| bt-aplinfo | 47 of 47 | 100 percent |
+| bin/signature-lib | 76 of 76 | 100 percent |
+| bin/generate-signature | 87 of 87 | 100 percent |
+
+The gate stays at 99.

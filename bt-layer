@@ -122,8 +122,8 @@ if [[ -n "$parent" ]]; then
         || fatal "parent manifest is incomplete"
     parent_overlays=$(layer_manifest_get "$parent_manifest" common_overlays) \
         || fatal "parent manifest is incomplete"
-    build_conf=$(layer_child_conf "$full_conf" "$parent_conf" "$FAB_PATH/common/conf")
     build_overlays=$(layer_child_overlays "$full_overlays" "$parent_overlays")
+    build_conf=$(layer_child_conf "$full_conf" "$parent_conf" "$FAB_PATH/common/conf" "$FAB_PATH/common/overlays" "$build_overlays")
     make_args=("COMMON_OVERLAYS=$build_overlays" "COMMON_CONF=$build_conf")
     info "overlays for this layer: $build_overlays"
     info "conf for this layer: $build_conf"
