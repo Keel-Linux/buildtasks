@@ -36,6 +36,31 @@ LAYER_SUBMOUNTS="run dev/pts dev proc sys"
 
 LAYER_ZSTD_LEVEL=19
 
+# A unit is a component supplied to fab as a directory under the product's
+# UNIT_DIRS, carrying any of these four inputs. fab resolves the plan, applies
+# the overlay, runs the conf script and applies the removelist.
+LAYER_UNIT_INPUTS="plan overlay conf removelist"
+
+# What the manifest says when a layer has no unit, and what a field missing
+# from an older manifest is read as. Never a valid unit name, since a name
+# has to be followed by @version.
+LAYER_UNITS_NONE=none
+
+# A unit token is name@version. The name is the directory name, under the
+# same rule as a layer name; the version has no @ and no space, so the two
+# halves of a token are never ambiguous.
+LAYER_UNIT_NAME_RE='^[a-z0-9][a-z0-9._-]*$'
+LAYER_UNIT_VERSION_RE='^[A-Za-z0-9][A-Za-z0-9._+~-]*$'
+LAYER_UNIT_VERSION_MAX=64
+
+# The first line of a unit's version file that is neither blank nor a
+# comment, trimmed of the whitespace around it
+LAYER_UNIT_VERSION_AWK='{ sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") { print; exit } }'
+
+# How many hex digits of the content digest a unit version keeps when the
+# unit pins itself neither by a version file nor by being its own checkout.
+LAYER_UNIT_DIGEST_LENGTH=16
+
 layer_error() {
     echo "ERROR [layer-lib]: $*" 1>&2
     return 1
@@ -169,6 +194,214 @@ layer_child_overlays() {
     echo "$LAYER_CHILD_OVERLAYS $child" | sed 's/ $//'
 }
 
+# layer_unit_content DIR: what the unit is made of, one line per path with
+# its type, mode and symlink target, then the sha256 of every file. Sorted in
+# the C locale, so the listing does not move with the caller's environment;
+# .git is left out, so a unit that is its own checkout reads the same as the
+# same files unpacked from a tarball.
+layer_unit_content() {
+    local dir=$1
+    ( cd "$dir" && find . -path ./.git -prune -o -printf '%y %m %P %l\n' | LC_ALL=C sort ) || return 1
+    ( cd "$dir" && find . -path ./.git -prune -o -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 -r sha256sum ) || return 1
+}
+
+# layer_unit_digest DIR: a version for a unit that pins itself no other way,
+# derived from what the directory holds.
+layer_unit_digest() {
+    local dir=$1
+    local digest
+    [[ -d "$dir" ]] || { layer_error "not a unit directory: $dir"; return 1; }
+    digest=$(layer_unit_content "$dir" | sha256sum | cut -d ' ' -f 1) || return 1
+    echo "sha256-${digest:0:$LAYER_UNIT_DIGEST_LENGTH}"
+}
+
+# layer_unit_version DIR: the version of one unit, from the first of three
+# sources that answers.
+#
+#   a version file      the pin the recipe declared, written by whatever
+#                       materialised unit.d; authoritative when present
+#   its own git HEAD     a component checked out as its own repository, the
+#                       same pin common_commit records for the shared tree;
+#                       only when DIR is the top of that work tree, so the
+#                       commit of an enclosing product repository is never
+#                       passed off as the component's
+#   the content digest   so that an assembled or scratch unit still has an
+#                       identity, and two different contents never record
+#                       the same version
+layer_unit_version() {
+    local dir=$1
+    local name version toplevel
+    name=$(basename "$dir")
+    if [[ -f "$dir/version" ]]; then
+        version=$(awk "$LAYER_UNIT_VERSION_AWK" "$dir/version")
+        if [[ ! "$version" =~ $LAYER_UNIT_VERSION_RE ]] || [[ ${#version} -gt $LAYER_UNIT_VERSION_MAX ]]; then
+            layer_error "unit '$name': $dir/version is not a version: '$version'"
+            return 1
+        fi
+        echo "$version"
+        return 0
+    fi
+    toplevel=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || toplevel=
+    if [[ -n "$toplevel" ]] && [[ "$(readlink -f "$toplevel")" == "$(readlink -f "$dir")" ]]; then
+        version=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || version=
+        if [[ -n "$version" ]]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+    layer_unit_digest "$dir"
+}
+
+# layer_unit_check DIR: refuse a unit directory fab would misread. An empty
+# directory contributes nothing and means the assembly step went wrong, and a
+# conf script without the execute bit is skipped by fab without a word, which
+# is the same silent no-op the manifest work exists to end.
+layer_unit_check() {
+    local dir=$1
+    local name input found=
+    name=$(basename "$dir")
+    for input in $LAYER_UNIT_INPUTS; do
+        [[ ! -e "$dir/$input" ]] || found=yes
+    done
+    if [[ -z "$found" ]]; then
+        layer_error "unit '$name' carries none of: $LAYER_UNIT_INPUTS"
+        return 1
+    fi
+    if [[ -e "$dir/conf" && ! -x "$dir/conf" ]]; then
+        layer_error "unit '$name': conf is not executable, so fab would skip it"
+        return 1
+    fi
+    if [[ -e "$dir/overlay" && ! -d "$dir/overlay" ]]; then
+        layer_error "unit '$name': overlay is not a directory"
+        return 1
+    fi
+    return 0
+}
+
+# layer_units PRODUCT_DIR UNIT_DIRS: the units the product supplies, as
+# name@version sorted by name, or none. UNIT_DIRS is the product-relative
+# directory fab reads them from; empty means the product's fab has no unit
+# support, which is not an error.
+layer_units() {
+    local product_dir=$1
+    local unit_dirs=$2
+    local base=$product_dir/$unit_dirs
+    local path name version out=()
+    if [[ -z "$unit_dirs" ]] || [[ ! -d "$base" ]]; then
+        echo "$LAYER_UNITS_NONE"
+        return 0
+    fi
+    for path in "$base"/*; do
+        [[ -e "$path" ]] || continue
+        name=$(basename "$path")
+        if [[ ! -d "$path" ]]; then
+            layer_error "$unit_dirs/$name is not a directory"
+            return 1
+        fi
+        if [[ ! "$name" =~ $LAYER_UNIT_NAME_RE ]]; then
+            layer_error "invalid unit name '$name' in $base"
+            return 1
+        fi
+        layer_unit_check "$path" || return 1
+        version=$(layer_unit_version "$path") || return 1
+        out+=("$name@$version")
+    done
+    if [[ ${#out[@]} -eq 0 ]]; then
+        echo "$LAYER_UNITS_NONE"
+        return 0
+    fi
+    printf '%s\n' "${out[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# layer_units_version UNITS NAME: the version UNITS records for NAME, empty
+# when it records none
+layer_units_version() {
+    local units=$1
+    local wanted=$2
+    local token
+    for token in $units; do
+        [[ "$token" != "$LAYER_UNITS_NONE" ]] || continue
+        if [[ "${token%@*}" == "$wanted" ]]; then
+            echo "${token##*@}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# layer_child_units OWN PARENT: the units this build has to apply, which are
+# the ones the parent layer did not.
+#
+# A unit the parent applied at another version is refused rather than
+# applied: a conf script runs once, so there is no move from one version of a
+# component to another inside a child layer, and re-running the script on top
+# of the old version is what breaks (conf/mysql symlinks /etc/init.d/mysql
+# under bash -e and fails the second time). The parent is the thing to
+# rebuild.
+layer_child_units() {
+    local own=$1
+    local parent=$2
+    local out=() token name version seen
+    for token in $own; do
+        [[ "$token" != "$LAYER_UNITS_NONE" ]] || continue
+        name=${token%@*}
+        version=${token##*@}
+        seen=$(layer_units_version "$parent" "$name")
+        if [[ -z "$seen" ]]; then
+            out+=("$token")
+        elif [[ "$seen" != "$version" ]]; then
+            layer_error "unit '$name' is $version here and $seen in the parent" \
+                "layer; a conf script runs once, so rebuild the parent instead"
+            return 1
+        fi
+    done
+    if [[ ${#out[@]} -eq 0 ]]; then
+        echo "$LAYER_UNITS_NONE"
+        return 0
+    fi
+    echo "${out[*]}"
+}
+
+# layer_units_merge PARENT OWN: every unit the finished layer carries, the
+# parent's and this build's, sorted by name.
+#
+# The field is cumulative on purpose. A layer built on this one subtracts
+# what this one records, so a component must stay recorded even when the
+# recipe of this layer does not declare it: a child that carries no database
+# content of its own still sits on the database, and its own child has to
+# know that. Where both name the same unit the versions agree, because
+# layer_child_units refuses the build otherwise.
+layer_units_merge() {
+    local parent=$1
+    local own=$2
+    local out=() token name
+    for token in $own $parent; do
+        [[ "$token" != "$LAYER_UNITS_NONE" ]] || continue
+        name=${token%@*}
+        [[ -z "$(layer_units_version "${out[*]}" "$name")" ]] || continue
+        out+=("$token")
+    done
+    if [[ ${#out[@]} -eq 0 ]]; then
+        echo "$LAYER_UNITS_NONE"
+        return 0
+    fi
+    printf '%s\n' "${out[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# layer_unit_paths UNIT_DIRS UNITS: the directories fab has to apply, the
+# value of its UNITS variable. Empty for none, which is what a child layer
+# that inherits every one of its components passes.
+layer_unit_paths() {
+    local unit_dirs=$1
+    local units=$2
+    local out=() token
+    for token in $units; do
+        [[ "$token" != "$LAYER_UNITS_NONE" ]] || continue
+        out+=("$unit_dirs/${token%@*}")
+    done
+    echo "${out[*]}"
+}
+
 layer_manifest_render() {
     local key value
     if [[ $(( $# % 2 )) -ne 0 ]]; then
@@ -201,6 +434,22 @@ layer_manifest_get() {
         return 1
     fi
     echo "$value"
+}
+
+# layer_manifest_opt MANIFEST KEY DEFAULT: the value of KEY, or DEFAULT when
+# the manifest does not carry that field. Manifests written before a field
+# existed stay usable as parents; a missing file is still an error.
+layer_manifest_opt() {
+    local manifest=$1
+    local key=$2
+    local default=$3
+    local value
+    if [[ ! -f "$manifest" ]]; then
+        layer_error "manifest not found: $manifest"
+        return 1
+    fi
+    value=$(sed -n "s|^$key ||p" "$manifest" | head -n 1)
+    echo "${value:-$default}"
 }
 
 layer_tar_flags() {

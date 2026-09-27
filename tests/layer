@@ -2,14 +2,26 @@
 # Test bt-layer and bin/layer-lib against scratch directories. Nothing is
 # built: products are fake Makefiles, fab and the signature helper are stubs.
 #
-# Code paths covered (42 of 42):
+# Code paths covered:
 #   layer-lib: layer_kind (rootfs, delta); layer_altstrap_path; layer_epoch
 #     (env, env invalid, git fallback, no git); layer_git_commit (git, none);
 #     layer_make_var (ok, failure); layer_words_has; layer_words_minus;
 #     layer_child_conf (stack on core with ssl ciphers, app on stack, no
 #     turnkey.d, overlay carrying the ciphers mark, overlay without it);
-#     layer_needs_ssl_ciphers; layer_child_overlays; layer_manifest_render (ok, odd args,
+#     layer_needs_ssl_ciphers; layer_child_overlays; layer_unit_content and
+#     layer_unit_digest (same content, file content, directory mode, symlink,
+#     symlink target, .git ignored, missing directory); layer_unit_version
+#     (version file, comments and whitespace, not a version, an @ in it, too
+#     long, own checkout, a unit inside another repository, digest);
+#     layer_unit_check (every input, plan only, empty, conf not executable,
+#     overlay not a directory); layer_units (no unit.d, no UNIT_DIRS, empty
+#     unit.d, sorted, not a directory, bad name, hollow unit);
+#     layer_units_version (found, absent, none); layer_child_units (parent
+#     has none, has one of two, has both, own none, version conflict);
+#     layer_units_merge (none, own only, parent only, union, overlap);
+#     layer_unit_paths (none, two); layer_manifest_render (ok, odd args,
 #     bad key); layer_manifest_get (ok, missing file, missing key);
+#     layer_manifest_opt (present, absent, missing file);
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
 #     layer_audit_packages (clean, unconfigured package);
 #     layer_check_build (ok, no stamp, not mounted, no upper);
@@ -23,7 +35,11 @@
 #     altstrap created and removed, hash file with BT_GPGKEY); repeated
 #     export with -u is byte identical; -u without a build; unknown parent;
 #     stale altstrap symlink; parent manifest without conf list; product
-#     without a debug target; failing make removes the altstrap; TERM default.
+#     without a debug target; failing make removes the altstrap; TERM default;
+#     a rootfs layer with a unit; a child that composes the same unit; a child
+#     that adds one; a child with no unit of its own; a unit pinned to another
+#     version than the parent applied; a unit whose conf fab would skip; a
+#     parent manifest written before the units field existed.
 
 fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
 info() { echo "INFO [$(basename "$0")]: $*"; }
@@ -79,6 +95,10 @@ write_product() {
 COMMON_CONF := $conf
 COMMON_OVERLAYS := $overlays
 
+# as share/product.mk defines them
+UNIT_DIRS ?= unit.d
+UNITS ?= \$(sort \$(wildcard \$(UNIT_DIRS)/*))
+
 debug:
 	\$(foreach v,\$(V),\$(warning \$(v) = \$(\$(v))))
 	@true
@@ -101,6 +121,7 @@ build/stamps/root.patched:
 	echo conf > build/.deck/root.patched/upper/etc/x.conf
 	echo "\$(COMMON_OVERLAYS)" > build/overlays.used
 	echo "\$(COMMON_CONF)" > build/conf.used
+	echo "\$(UNITS)" > build/units.used
 	echo "\$\$TERM" > build/term.used
 	readlink "\$(FAB_PATH)/altstraps/trixie-amd64.core" > build/altstrap.used || true
 	touch build/stamps/root.patched
@@ -175,6 +196,136 @@ assert_eq child-overlays "$(layer_child_overlays "turnkey.d apache php" "turnkey
 assert_eq child-overlays-none "$(layer_child_overlays "turnkey.d" "turnkey.d")" \
     "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot"
 
+info "8b: layer_unit_digest"
+units=$tmp/units
+write_unit() {
+    local dir=$units/$1
+    mkdir -p "$dir/overlay/etc"
+    echo "${2:-body}" > "$dir/overlay/etc/file"
+    printf '#!/bin/sh\ntrue\n' > "$dir/conf"
+    chmod 755 "$dir/conf"
+    : > "$dir/plan"
+}
+write_unit alpha
+write_unit beta
+digest_alpha=$(layer_unit_digest "$units/alpha")
+[[ "$digest_alpha" =~ ^sha256-[0-9a-f]{16}$ ]] \
+    || fatal "digest is not sha256- plus 16 hex digits: $digest_alpha"
+assert_eq digest-same "$(layer_unit_digest "$units/beta")" "$digest_alpha"
+assert_eq digest-stable "$(layer_unit_digest "$units/alpha")" "$digest_alpha"
+echo other > "$units/beta/overlay/etc/file"
+[[ "$(layer_unit_digest "$units/beta")" != "$digest_alpha" ]] \
+    || fatal "digest ignores file content"
+echo "${digest_alpha}" > /dev/null
+write_unit gamma
+chmod 700 "$units/gamma/overlay/etc"
+[[ "$(layer_unit_digest "$units/gamma")" != "$digest_alpha" ]] \
+    || fatal "digest ignores the mode of a directory"
+write_unit delta
+ln -s file "$units/delta/overlay/etc/link"
+digest_delta=$(layer_unit_digest "$units/delta")
+[[ "$digest_delta" != "$digest_alpha" ]] || fatal "digest ignores a symlink"
+ln -sfn other "$units/delta/overlay/etc/link"
+[[ "$(layer_unit_digest "$units/delta")" != "$digest_delta" ]] \
+    || fatal "digest ignores a symlink target"
+write_unit epsilon
+git -C "$units/epsilon" init -q
+assert_eq digest-ignores-git "$(layer_unit_digest "$units/epsilon")" "$digest_alpha"
+expect_fail digest-missing layer_unit_digest "$tmp/no-such-unit"
+
+info "8c: layer_unit_version"
+echo '1.2.0' > "$units/alpha/version"
+assert_eq version-file "$(layer_unit_version "$units/alpha")" 1.2.0
+printf '# the pin\n\n 2.0.0~rc1 \n' > "$units/alpha/version"
+assert_eq version-file-comment "$(layer_unit_version "$units/alpha")" "2.0.0~rc1"
+echo 'not a version' > "$units/alpha/version"
+expect_fail version-file-bad layer_unit_version "$units/alpha"
+echo 'a@b' > "$units/alpha/version"
+expect_fail version-file-at layer_unit_version "$units/alpha"
+printf 'v%065d\n' 1 > "$units/alpha/version"
+expect_fail version-file-long layer_unit_version "$units/alpha"
+rm "$units/alpha/version"
+assert_eq version-digest "$(layer_unit_version "$units/alpha")" "$digest_alpha"
+own=$tmp/own-checkout
+mkdir -p "$own"
+write_unit_at() {
+    mkdir -p "$1/overlay"
+    echo body > "$1/overlay/file"
+}
+write_unit_at "$own"
+git -C "$own" init -q
+git -C "$own" -c user.name=t -c user.email=t@[2001:db8::1] add -A
+git -C "$own" -c user.name=t -c user.email=t@[2001:db8::1] commit -q -m unit
+assert_eq version-own-git "$(layer_unit_version "$own")" "$(git -C "$own" rev-parse HEAD)"
+inner=$own/unit.d/nested
+write_unit_at "$inner"
+[[ "$(layer_unit_version "$inner")" != "$(git -C "$own" rev-parse HEAD)" ]] \
+    || fatal "a unit inside a repository reported the repository's commit"
+assert_eq version-nested-digest "$(layer_unit_version "$inner")" \
+    "$(layer_unit_digest "$inner")"
+
+info "8d: layer_unit_check"
+expect_ok unit-check-full layer_unit_check "$units/beta"
+mkdir -p "$units/plan-only"
+: > "$units/plan-only/plan"
+expect_ok unit-check-plan-only layer_unit_check "$units/plan-only"
+mkdir -p "$units/empty"
+expect_fail unit-check-empty layer_unit_check "$units/empty"
+mkdir -p "$units/notexec/overlay"
+printf '#!/bin/sh\ntrue\n' > "$units/notexec/conf"
+chmod 644 "$units/notexec/conf"
+expect_fail unit-check-notexec layer_unit_check "$units/notexec"
+mkdir -p "$units/flatoverlay"
+: > "$units/flatoverlay/overlay"
+expect_fail unit-check-overlay-file layer_unit_check "$units/flatoverlay"
+
+info "8e: layer_units"
+prod=$tmp/unitprod
+mkdir -p "$prod"
+assert_eq units-no-dir "$(layer_units "$prod" unit.d)" none
+assert_eq units-no-var "$(layer_units "$prod" "")" none
+mkdir -p "$prod/unit.d"
+assert_eq units-empty-dir "$(layer_units "$prod" unit.d)" none
+cp -a "$units/beta" "$prod/unit.d/mariadb"
+echo '1.0.0' > "$prod/unit.d/mariadb/version"
+cp -a "$units/plan-only" "$prod/unit.d/adminer"
+echo '0.9' > "$prod/unit.d/adminer/version"
+assert_eq units-sorted "$(layer_units "$prod" unit.d)" "adminer@0.9 mariadb@1.0.0"
+: > "$prod/unit.d/README"
+expect_fail units-not-a-dir layer_units "$prod" unit.d
+rm "$prod/unit.d/README"
+mkdir -p "$prod/unit.d/Bad_Name"
+: > "$prod/unit.d/Bad_Name/plan"
+expect_fail units-bad-name layer_units "$prod" unit.d
+rm -rf "$prod/unit.d/Bad_Name"
+mkdir -p "$prod/unit.d/hollow"
+expect_fail units-hollow layer_units "$prod" unit.d
+rm -rf "$prod/unit.d/hollow"
+assert_eq units-after-cleanup "$(layer_units "$prod" unit.d)" "adminer@0.9 mariadb@1.0.0"
+
+info "8f: layer_units_version, layer_child_units, layer_units_merge, layer_unit_paths"
+assert_eq units-version "$(layer_units_version "adminer@0.9 mariadb@1.0.0" mariadb)" 1.0.0
+assert_eq units-version-missing "$(layer_units_version "adminer@0.9" mariadb)" ""
+assert_eq units-version-none "$(layer_units_version none mariadb)" ""
+assert_eq child-units-all "$(layer_child_units "adminer@0.9 mariadb@1.0.0" none)" \
+    "adminer@0.9 mariadb@1.0.0"
+assert_eq child-units-partial \
+    "$(layer_child_units "adminer@0.9 mariadb@1.0.0" "mariadb@1.0.0")" "adminer@0.9"
+assert_eq child-units-none \
+    "$(layer_child_units "mariadb@1.0.0" "adminer@0.9 mariadb@1.0.0")" none
+assert_eq child-units-own-none "$(layer_child_units none "mariadb@1.0.0")" none
+expect_fail child-units-conflict layer_child_units "mariadb@2.0.0" "mariadb@1.0.0"
+assert_eq merge-none "$(layer_units_merge none none)" none
+assert_eq merge-own "$(layer_units_merge none "mariadb@1.0.0")" "mariadb@1.0.0"
+assert_eq merge-parent "$(layer_units_merge "mariadb@1.0.0" none)" "mariadb@1.0.0"
+assert_eq merge-union "$(layer_units_merge "mariadb@1.0.0" "adminer@0.9")" \
+    "adminer@0.9 mariadb@1.0.0"
+assert_eq merge-overlap "$(layer_units_merge "mariadb@1.0.0" "mariadb@1.0.0")" \
+    "mariadb@1.0.0"
+assert_eq paths-none "$(layer_unit_paths unit.d none)" ""
+assert_eq paths-two "$(layer_unit_paths unit.d "adminer@0.9 mariadb@1.0.0")" \
+    "unit.d/adminer unit.d/mariadb"
+
 info "9: layer_manifest_render and layer_manifest_get"
 manifest=$tmp/test.manifest
 layer_manifest_render layer core sha256 abc common_conf "turnkey.d php" > "$manifest"
@@ -184,6 +335,9 @@ expect_fail manifest-odd layer_manifest_render layer core sha256
 expect_fail manifest-badkey layer_manifest_render "Bad Key" x
 expect_fail manifest-nofile layer_manifest_get "$tmp/none.manifest" sha256
 expect_fail manifest-nokey layer_manifest_get "$manifest" size
+assert_eq manifest-opt "$(layer_manifest_opt "$manifest" common_conf none)" "turnkey.d php"
+assert_eq manifest-opt-default "$(layer_manifest_opt "$manifest" units none)" none
+expect_fail manifest-opt-nofile layer_manifest_opt "$tmp/none.manifest" units none
 
 info "10: layer_tar_flags and layer_tar_members"
 flags=$(layer_tar_flags 1700000000)
@@ -407,6 +561,82 @@ expect_fail no-debug-target "$sbt/bt-layer" nodebug
 expect_fail make-fails "$sbt/bt-layer" broken --parent core
 [[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap left behind after failed make"
 grep -q 'test ! -f FAIL' "$L/broken.log" || fatal "build log not written on failure"
+
+info "22: bt-layer with units (a component supplied as a fab unit)"
+# add_unit PRODUCT NAME VERSION: a unit fab would apply, pinned by a version
+# file the way an assembly step would write it
+add_unit() {
+    local dir=$tmp/products/$1/unit.d/$2
+    mkdir -p "$dir/overlay/etc"
+    echo "$2" > "$dir/overlay/etc/$2.conf"
+    printf '#!/bin/sh\ntrue\n' > "$dir/conf"
+    chmod 755 "$dir/conf"
+    : > "$dir/plan"
+    echo "$3" > "$dir/version"
+}
+assert_eq core-units "$(layer_manifest_get "$L/core.manifest" units)" none
+assert_eq core-build-units "$(layer_manifest_get "$L/core.manifest" build_units)" default
+assert_eq lamp-units "$(layer_manifest_get "$L/lamp.manifest" units)" none
+assert_eq lamp-build-units "$(layer_manifest_get "$L/lamp.manifest" build_units)" none
+assert_eq lamp-units-used "$(cat "$tmp/products/lamp/build/units.used")" ""
+
+write_product "$tmp/products/db" "turnkey.d mysql" "turnkey.d mysql"
+add_unit db mariadb 1.0.0
+"$sbt/bt-layer" db >/dev/null
+assert_eq db-units "$(layer_manifest_get "$L/db.manifest" units)" "mariadb@1.0.0"
+assert_eq db-build-units "$(layer_manifest_get "$L/db.manifest" build_units)" default
+assert_eq db-units-used "$(cat "$tmp/products/db/build/units.used")" "unit.d/mariadb"
+
+info "22a: a child that composes the same unit does not apply it again"
+write_product "$tmp/products/app" "turnkey.d mysql" "turnkey.d mysql"
+add_unit app mariadb 1.0.0
+out=$("$sbt/bt-layer" app --parent db)
+grep -q 'units for this layer: none' <<<"$out" || fatal "expected no units for app"
+assert_eq app-units "$(layer_manifest_get "$L/app.manifest" units)" "mariadb@1.0.0"
+assert_eq app-build-units "$(layer_manifest_get "$L/app.manifest" build_units)" none
+assert_eq app-units-used "$(cat "$tmp/products/app/build/units.used")" ""
+
+info "22b: a child adds only the unit the parent has not applied"
+write_product "$tmp/products/app2" "turnkey.d mysql" "turnkey.d mysql"
+add_unit app2 mariadb 1.0.0
+add_unit app2 adminer 0.9
+"$sbt/bt-layer" app2 --parent db >/dev/null
+assert_eq app2-units "$(layer_manifest_get "$L/app2.manifest" units)" \
+    "adminer@0.9 mariadb@1.0.0"
+assert_eq app2-build-units "$(layer_manifest_get "$L/app2.manifest" build_units)" \
+    "adminer@0.9"
+assert_eq app2-units-used "$(cat "$tmp/products/app2/build/units.used")" "unit.d/adminer"
+
+info "22c: a child with no unit of its own still records the parent's"
+write_product "$tmp/products/app3" "turnkey.d" "turnkey.d"
+"$sbt/bt-layer" app3 --parent db >/dev/null
+assert_eq app3-units "$(layer_manifest_get "$L/app3.manifest" units)" "mariadb@1.0.0"
+assert_eq app3-build-units "$(layer_manifest_get "$L/app3.manifest" build_units)" none
+assert_eq app3-units-used "$(cat "$tmp/products/app3/build/units.used")" ""
+
+info "22d: a unit pinned to another version than the parent applied is refused"
+write_product "$tmp/products/app4" "turnkey.d mysql" "turnkey.d mysql"
+add_unit app4 mariadb 2.0.0
+out=$("$sbt/bt-layer" app4 --parent db 2>&1 || true)
+grep -q "unit 'mariadb' is 2.0.0 here and 1.0.0 in the parent" <<<"$out" \
+    || fatal "version conflict not reported: $out"
+[[ ! -e "$L/app4.manifest" ]] || fatal "app4 layer exported despite the conflict"
+[[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap left behind"
+
+info "22e: a unit fab would skip, and a manifest older than the units field"
+mkdir -p "$tmp/products/app5"
+write_product "$tmp/products/app5" "turnkey.d" "turnkey.d"
+add_unit app5 broken 1.0
+chmod 644 "$tmp/products/app5/unit.d/broken/conf"
+out=$("$sbt/bt-layer" app5 --parent db 2>&1 || true)
+grep -q "conf is not executable" <<<"$out" || fatal "non-executable conf not caught: $out"
+chmod 755 "$tmp/products/app5/unit.d/broken/conf"
+sed -i '/^units /d' "$L/db.manifest"
+"$sbt/bt-layer" app5 --parent db >/dev/null
+assert_eq app5-units "$(layer_manifest_get "$L/app5.manifest" units)" "broken@1.0"
+assert_eq app5-build-units "$(layer_manifest_get "$L/app5.manifest" build_units)" \
+    "broken@1.0"
+assert_eq app5-units-used "$(cat "$tmp/products/app5/build/units.used")" "unit.d/broken"
 
 echo
 info "all tests passed"
