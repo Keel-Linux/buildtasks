@@ -71,6 +71,31 @@ The gate stays at 99. The stub `tests/layer` puts where `bt-layer` expects
 `generate-signature` is excluded by its scratch path, so the stub's 100
 percent cannot stand in for the real script's number.
 
+## 2026-09-27: units in the layer manifest
+
+`bt-layer` records the components a layer carries as fab units, and a child
+layer subtracts the ones its parent applied instead of applying them again.
+Ten new functions in `bin/layer-lib` (`layer_unit_content`,
+`layer_unit_digest`, `layer_unit_version`, `layer_unit_check`, `layer_units`,
+`layer_units_version`, `layer_child_units`, `layer_units_merge`,
+`layer_unit_paths`, `layer_manifest_opt`) and six cases in `tests/layer`
+covering a rootfs layer with a unit, a child that composes the same unit, a
+child that adds one, a child with none of its own, a version conflict and a
+unit whose `conf` fab would skip.
+
+| File | Lines covered | Cover |
+|------|---------------|-------|
+| bin/layer-lib | 331 of 332 | 99 percent |
+| bt-layer | 110 of 111 | 99 percent |
+| bin/aplinfo-lib | 186 of 186 | 100 percent |
+| bt-aplinfo | 47 of 47 | 100 percent |
+| bin/signature-lib | 76 of 76 | 100 percent |
+| bin/generate-signature | 87 of 87 | 100 percent |
+
+The gate stays at 99. Both missing lines are the continuation of a
+multi-line command, which kcov cannot attribute; every function added here
+is fully covered, so nothing new was written in that shape.
+
 ## 2026-09-27: the cipher list of a child layer
 
 `layer_needs_ssl_ciphers` decides whether a child layer has to run

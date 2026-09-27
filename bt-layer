@@ -30,8 +30,9 @@ Options::
 
     -p|--parent LAYER   - build on top of layer LAYER (exported earlier by
                           $APP on this host) instead of the bootstrap; only
-                          the overlays and conf scripts the parent did not
-                          run are applied, plus the ones every layer needs
+                          the overlays, conf scripts and units the parent did
+                          not apply are applied, plus the ones every layer
+                          needs
     -u|--use-existing   - skip the build and export the existing
                           build/root.patched (fails if it is missing)
 
@@ -52,7 +53,11 @@ Output, in \$BT_BUILDS/layers/::
     layer.tar.zst           full rootfs without --parent, the root.build and
                             root.patched deck upper directories with --parent
     layer.tar.zst.sha256    sha256sum of the tarball
-    layer.manifest          plain text, one "key value" per line
+    layer.manifest          plain text, one "key value" per line; "units"
+                            lists every component this layer carries as a fab
+                            unit, as name@version, the parent's and this
+                            build's, and "build_units" the ones this build
+                            applied
     layer.rootfs/           copy of root.patched, the altstrap for children
     layer.log               build log
 
@@ -113,8 +118,14 @@ full_conf=$(layer_make_var "$product_dir" COMMON_CONF) \
     || fatal "cannot read COMMON_CONF of $layer"
 full_overlays=$(layer_make_var "$product_dir" COMMON_OVERLAYS) \
     || fatal "cannot read COMMON_OVERLAYS of $layer"
+unit_dirs=$(layer_make_var "$product_dir" UNIT_DIRS) \
+    || fatal "cannot read UNIT_DIRS of $layer"
+own_units=$(layer_units "$product_dir" "$unit_dirs") \
+    || fatal "cannot read the units of $layer"
+full_units=$own_units
 build_conf=default
 build_overlays=default
+build_units=default
 make_args=()
 if [[ -n "$parent" ]]; then
     parent_manifest=$layers_dir/$parent.manifest
@@ -122,11 +133,18 @@ if [[ -n "$parent" ]]; then
         || fatal "parent manifest is incomplete"
     parent_overlays=$(layer_manifest_get "$parent_manifest" common_overlays) \
         || fatal "parent manifest is incomplete"
+    parent_units=$(layer_manifest_opt "$parent_manifest" units "$LAYER_UNITS_NONE") \
+        || fatal "parent manifest is unreadable"
     build_overlays=$(layer_child_overlays "$full_overlays" "$parent_overlays")
     build_conf=$(layer_child_conf "$full_conf" "$parent_conf" "$FAB_PATH/common/conf" "$FAB_PATH/common/overlays" "$build_overlays")
-    make_args=("COMMON_OVERLAYS=$build_overlays" "COMMON_CONF=$build_conf")
+    build_units=$(layer_child_units "$own_units" "$parent_units") \
+        || fatal "cannot work out the units of $layer"
+    full_units=$(layer_units_merge "$parent_units" "$own_units")
+    build_unit_paths=$(layer_unit_paths "$unit_dirs" "$build_units")
+    make_args=("COMMON_OVERLAYS=$build_overlays" "COMMON_CONF=$build_conf" "UNITS=$build_unit_paths")
     info "overlays for this layer: $build_overlays"
     info "conf for this layer: $build_conf"
+    info "units for this layer: $build_units (of $full_units)"
 fi
 
 altstrap=
@@ -197,8 +215,10 @@ layer_manifest_render \
     source_date_epoch "$SOURCE_DATE_EPOCH" \
     common_overlays "$full_overlays" \
     common_conf "$full_conf" \
+    units "$full_units" \
     build_overlays "$build_overlays" \
     build_conf "$build_conf" \
+    build_units "$build_units" \
     tarball "$(basename "$tarball")" \
     sha256 "$sha256" \
     size "$size" \
