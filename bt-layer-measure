@@ -1,0 +1,195 @@
+#!/bin/bash -e
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+
+[[ -z "$BT_DEBUG" ]] || set -x
+set -o pipefail
+
+APP=$(basename "$0")
+BT=${BT:-$(dirname "$(readlink -f "$0")")}
+# shellcheck source=bin/layer-measure-lib
+source "$BT/bin/layer-measure-lib"
+
+EXIT_DIFFERENCES=1
+EXIT_USAGE=2
+EXIT_INPUT=3
+
+warning() { echo "WARNING [$APP]: $*"; }
+info() { echo "INFO [$APP]: $*"; }
+die() { local code=$1; shift; echo "FATAL [$APP]: $*" 1>&2; exit "$code"; }
+
+usage() {
+    cat<<EOF
+Syntax: $APP capture   --dir DIR --layer NAME [--parent NAME] --tag TAG
+                       [--state-max-bytes N]
+        $APP compare   --dir DIR --a TAG --b TAG
+        $APP attribute --dir DIR --control TAG --unit TAG --control-again TAG
+
+Builds a layer and records what it contains, then says what two or three of
+those records differ by. This is the three-build comparison handbook decision
+0010 step 3 requires of every component extracted from the shared tree:
+a control build, the same recipe with the component supplied as a fab unit,
+and the control again, because without the third build a difference cannot be
+attributed to anything.
+
+Subcommands::
+
+    capture             build \$layer and record its package list, file tree,
+                        symlinks and layer manifest under DIR/TAG; the bytes
+                        of every state path at or below --state-max-bytes are
+                        kept too, which is what lets a later comparison say
+                        what differs and not only that something does
+    compare             report what two captures differ by
+    attribute           report what the unit build differs from the control
+                        by that the control does not differ from itself by,
+                        and classify every state path inside that noise floor
+
+Options::
+
+    --dir DIR           where captures live; every subcommand takes it and
+                        none defaults to a home directory, so a second person
+                        re-runs the same command against the same directory
+    --layer NAME        the product to build, also the name of the layer
+    --parent NAME       build on top of that layer, as bt-layer --parent does
+    --tag TAG           names this capture: DIR/TAG. Refused if it exists
+    --state-max-bytes N ceiling on one sampled state file
+                        (default $MEASURE_STATE_MAX_BYTES_DEFAULT); a state
+                        file above it is recorded as not sampled and any
+                        comparison involving it fails rather than passing
+                        while blind
+    --a, --b TAG        the two captures compare reads
+    --control TAG       the control build
+    --unit TAG          the build with the component supplied as a unit
+    --control-again TAG the second control build, which is what makes a
+                        difference attributable
+
+Environment::
+
+    MEASURE_STATE_PATHS the list of state path globs
+                        (default \$BT/share/layer-state-paths)
+    MEASURE_BT_LAYER    the builder to run (default \$BT/bt-layer)
+    MEASURE_LAYERS_DIR  where the builder leaves \$layer.rootfs
+                        (default /mnt/builds/layers)
+    MEASURE_LOCK        the build lock (default /run/lock/keel-build.lock)
+    MEASURE_LOCK_WAIT   seconds to wait for it (default 7200)
+    SOURCE_DATE_EPOCH   passed through to the builder and recorded; the three
+                        builds must share it or nothing below means anything
+
+Exit status::
+
+    0                   no differences, or none attributable to the change
+    $EXIT_DIFFERENCES                   differences found
+    $EXIT_USAGE                   usage error
+    $EXIT_INPUT                   a capture, a build or a tool is missing
+
+Documentation: docs/layer-measure.md
+EOF
+}
+
+state_paths_file() {
+    printf '%s\n' "${MEASURE_STATE_PATHS:-$BT/share/layer-state-paths}"
+}
+
+do_capture() {
+    local dest=$MEASURE_DIR/$MEASURE_TAG
+    if [[ -e "$dest" ]]; then
+        die "$EXIT_USAGE" "$dest exists already: a capture is never overwritten, pick another --tag"
+    fi
+    local globs_file globs
+    globs_file=$(state_paths_file)
+    globs=$(measure_state_patterns "$globs_file") || die "$EXIT_INPUT" "no usable state path list"
+
+    local builder=${MEASURE_BT_LAYER:-$BT/bt-layer}
+    local layers=${MEASURE_LAYERS_DIR:-/mnt/builds/layers}
+    local lock=${MEASURE_LOCK:-/run/lock/keel-build.lock}
+    local lock_wait=${MEASURE_LOCK_WAIT:-7200}
+    local argv=("$builder")
+    [[ -z "$MEASURE_PARENT" ]] || argv+=(--parent "$MEASURE_PARENT")
+    argv+=("$MEASURE_LAYER")
+
+    mkdir -p "$dest"
+    info "$MEASURE_TAG: ${argv[*]}, waiting up to ${lock_wait}s for $lock"
+    if ! flock -w "$lock_wait" "$lock" "${argv[@]}" > "$dest/build.log" 2>&1; then
+        tail -n 20 "$dest/build.log" 1>&2
+        die "$EXIT_INPUT" "the build failed; its output is $dest/build.log"
+    fi
+
+    local rootfs=$layers/$MEASURE_LAYER.rootfs
+    if [[ ! -x "$rootfs/bin/bash" ]]; then
+        die "$EXIT_INPUT" "no built rootfs at $rootfs"
+    fi
+    measure_tree_record "$rootfs" > "$dest/tree.tsv" \
+        || die "$EXIT_INPUT" "could not record the file tree of $rootfs"
+    measure_links_record "$rootfs" > "$dest/links.tsv" \
+        || die "$EXIT_INPUT" "could not record the symlinks of $rootfs"
+    measure_pkgs_record "$rootfs" > "$dest/pkgs.tsv" \
+        || die "$EXIT_INPUT" "could not record the package list of $rootfs"
+    measure_state_sample "$rootfs" "$dest/tree.tsv" "$dest" "$MEASURE_CAP" "$globs"
+
+    if [[ -f "$layers/$MEASURE_LAYER.manifest" ]]; then
+        cp -- "$layers/$MEASURE_LAYER.manifest" "$dest/manifest.txt"
+    else
+        warning "no layer manifest at $layers/$MEASURE_LAYER.manifest, so this capture records no provenance for the layer"
+    fi
+
+    printf '%s\t%s\n' \
+        tag "$MEASURE_TAG" \
+        layer "$MEASURE_LAYER" \
+        parent "${MEASURE_PARENT:-none}" \
+        rootfs "$rootfs" \
+        epoch "${SOURCE_DATE_EPOCH:-none}" \
+        captured "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        builder "$builder" \
+        buildtasks_commit "$(git -C "$BT" rev-parse HEAD 2>/dev/null || echo none)" \
+        state_max_bytes "$MEASURE_CAP" \
+        state_paths "$globs_file" \
+        state_paths_sha256 "$(sha256sum < "$globs_file" | cut -d' ' -f1)" \
+        > "$dest/meta.tsv"
+
+    info "$MEASURE_TAG: $(measure_count "$dest/pkgs.tsv") packages, $(measure_count "$dest/tree.tsv") files, $(measure_count "$dest/links.tsv") symlinks, $(measure_count "$dest/state.tsv") state paths ($(grep -c "$(printf '\tsampled\t')" "$dest/state.tsv" || true) of them sampled)"
+    info "$MEASURE_TAG: recorded in $dest"
+}
+
+do_compare() {
+    local tag
+    for tag in "$MEASURE_A" "$MEASURE_B"; do
+        measure_capture_check "$MEASURE_DIR/$tag" || die "$EXIT_INPUT" "no complete capture $tag in $MEASURE_DIR"
+    done
+    measure_compare_report "$MEASURE_DIR" "$MEASURE_A" "$MEASURE_B" \
+        || exit "$EXIT_DIFFERENCES"
+}
+
+do_attribute() {
+    local tag
+    for tag in "$MEASURE_CONTROL" "$MEASURE_UNIT" "$MEASURE_CONTROL2"; do
+        measure_capture_check "$MEASURE_DIR/$tag" || die "$EXIT_INPUT" "no complete capture $tag in $MEASURE_DIR"
+    done
+    local globs_file globs
+    globs_file=$(state_paths_file)
+    globs=$(measure_state_patterns "$globs_file") || die "$EXIT_INPUT" "no usable state path list"
+    measure_attribute_report "$MEASURE_DIR" "$MEASURE_CONTROL" "$MEASURE_UNIT" \
+        "$MEASURE_CONTROL2" "$globs" "$globs_file" || exit "$EXIT_DIFFERENCES"
+}
+
+measure_parse_args "$@" || { usage 1>&2; exit "$EXIT_USAGE"; }
+if [[ -n "$MEASURE_HELP" ]]; then
+    usage
+    exit 0
+fi
+if [[ -z "$MEASURE_SUB" ]]; then
+    usage 1>&2
+    exit "$EXIT_USAGE"
+fi
+measure_check_args || exit "$EXIT_USAGE"
+
+case "$MEASURE_SUB" in
+    capture) do_capture ;;
+    compare) do_compare ;;
+    attribute) do_attribute ;;
+esac

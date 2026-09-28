@@ -37,13 +37,6 @@ installed:
 
     tests/coverage.sh            # threshold 95, or COVERAGE_THRESHOLD, or the first argument
 
-## Not measured
-
-`tests/appname-version` exercises the inherited `bin/appname-version` by hand
-and is not run under kcov; the other `bt-*` scripts (about 40 shell files)
-have no test. They follow the 0004 treatment when the project touches them,
-and the repository total is remeasured then.
-
 ## 2026-09-26: the build audit
 
 `layer_audit_packages` reads the built rootfs's dpkg status and refuses a
@@ -116,3 +109,45 @@ carries the mark and one that does not.
 | bin/generate-signature | 87 of 87 | 100 percent |
 
 The gate stays at 99.
+
+## 2026-09-28: the three-build comparison
+
+`bt-layer-measure` and `bin/layer-measure-lib` make handbook decision 0010
+step 3 executable: a capture subcommand that builds a layer and records its
+package list, file tree, symlinks and state paths, a compare subcommand over
+two captures and an attribute subcommand over the three the decision asks
+for. `tests/coverage.sh` now runs `tests/measure` as a fourth suite and
+measures eight files:
+
+| File | Lines covered | Cover |
+|------|---------------|-------|
+| bin/layer-lib | 331 of 332 | 99 percent |
+| bt-layer | 110 of 111 | 99 percent |
+| bin/aplinfo-lib | 186 of 186 | 100 percent |
+| bt-aplinfo | 47 of 47 | 100 percent |
+| bin/signature-lib | 76 of 76 | 100 percent |
+| bin/generate-signature | 87 of 87 | 100 percent |
+| bin/layer-measure-lib | 379 of 379 | 100 percent |
+| bt-layer-measure | 64 of 64 | 100 percent |
+
+The gate stays at 99, the lowest file rounded down. Both new files are at
+100 percent line and branch: every subcommand, every exit code (0, 1, 2 and
+3) and every error path is exercised, including the comparison itself, where
+`tests/measure` covers a difference inside the noise floor that is real and
+has to be reported (an account row gone from a text state file, and an edited
+account record in a binary one, both at paths whose clocks move in every
+build) as well as a run where nothing was sampled and the measurement fails
+rather than reporting a clean number it could not see.
+
+`tests/measure` sets `pipefail` the way `bt-layer-measure` does. Without it
+the suite passed while the executable did not: `measure_signature` inherited
+`cmp`'s "the files differ" status from a pipeline and reported a failure
+instead of a signature, which silently dropped one state path's verdict from
+every report.
+
+## Not measured
+
+`tests/appname-version` exercises the inherited `bin/appname-version` by hand
+and is not run under kcov; the other `bt-*` scripts have no test. They follow
+the 0004 treatment when the project touches them, and the repository total is
+remeasured then.

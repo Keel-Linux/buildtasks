@@ -1,0 +1,46 @@
+# Paths that can hold state that matters: accounts, credentials, keys and
+# database content. bt-layer-measure never subtracts a difference at one of
+# these because it fell inside the noise floor. It keeps their bytes at
+# capture time and compares them in both pairs, so a clock that moves in
+# every build is reported as noise while an account that is gone in one
+# build is reported as real.
+#
+# The rule this list exists for: for the mariadb component the noise floor
+# was 179 files of which 173 were ./var/lib/mysql/**, and that directory
+# holds mysql/global_priv and mysql/user.*, so the measurement of a
+# component whose build-time job includes deleting accounts was blind
+# exactly where the accounts live.
+#
+# One bash glob per line; * crosses a slash, so ** and * are the same thing
+# here and ** is written where a whole subtree is meant. Adding a path is
+# cheap: it costs a copy of the file in each capture and a byte comparison.
+
+# accounts and credentials
+./etc/shadow
+./etc/gshadow
+./etc/passwd
+./etc/group
+./etc/subuid
+./etc/subgid
+./etc/sudoers
+./etc/sudoers.d/**
+./etc/security/opasswd
+
+# host and user keys
+./etc/ssh/ssh_host_*
+./root/.ssh/**
+./home/**/.ssh/**
+./etc/ssl/private/**
+
+# database state
+./var/lib/mysql/**
+./var/lib/postgresql/**
+./var/lib/redis/**
+./var/lib/couchdb/**
+./var/lib/mongodb/**
+
+# application and console accounts
+./etc/webmin/miniserv.users
+./etc/webmin/miniserv.conf
+./var/lib/nodebb/**
+./etc/keel/instance.d/**

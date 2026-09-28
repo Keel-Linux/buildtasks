@@ -3,6 +3,7 @@
 #   bin/layer-lib and bt-layer under tests/layer
 #   bin/aplinfo-lib and bt-aplinfo under tests/aplinfo
 #   bin/signature-lib and bin/generate-signature under tests/signature
+#   bin/layer-measure-lib and bt-layer-measure under tests/measure
 # Exits 1 when a measured file is below the threshold (default 95), 2 when a
 # tool is missing.
 #
@@ -30,9 +31,9 @@ for tool in kcov zstd git gpg; do
 done
 
 report="${COVERAGE_DIR:-$(mktemp -d)}"
-measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo,/bin/signature-lib,/bin/generate-signature
+measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo,/bin/signature-lib,/bin/generate-signature,/bin/layer-measure-lib,/bt-layer-measure
 skipped=/tests/,/scratch-bt/bin/generate-signature
-for suite in layer aplinfo signature; do
+for suite in layer aplinfo signature measure; do
     kcov --include-pattern="$measured" --exclude-pattern="$skipped" \
         "$report" "$here/$suite"
 done
