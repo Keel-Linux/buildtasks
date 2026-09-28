@@ -112,12 +112,16 @@ The gate stays at 99.
 
 ## 2026-09-28: the three-build comparison
 
-`bt-layer-measure` and `bin/layer-measure-lib` make handbook decision 0010
-step 3 executable: a capture subcommand that builds a layer and records its
-package list, file tree, symlinks and state paths, a compare subcommand over
-two captures and an attribute subcommand over the three the decision asks
-for. `tests/coverage.sh` now runs `tests/measure` as a fourth suite and
-measures eight files:
+`bt-layer-measure` makes handbook decision 0010 step 3 executable: a capture
+subcommand that builds a layer and records its package list, file tree,
+symlinks and state paths, a compare subcommand over two captures and an
+attribute subcommand over the three or more the decision asks for. The logic
+is split three ways under decision 0004: `bin/layer-measure-lib` (capture and
+formats), `bin/layer-compare-lib` (whether a difference is noise) and
+`bin/layer-report-lib` (the blocks and the preconditions), with
+`bt-layer-measure` a thin main over them. `tests/coverage.sh` runs
+`tests/measure` and `tests/compare` as its fourth and fifth suites and
+measures ten files:
 
 | File | Lines covered | Cover |
 |------|---------------|-------|
@@ -127,23 +131,49 @@ measures eight files:
 | bt-aplinfo | 47 of 47 | 100 percent |
 | bin/signature-lib | 76 of 76 | 100 percent |
 | bin/generate-signature | 87 of 87 | 100 percent |
-| bin/layer-measure-lib | 379 of 379 | 100 percent |
-| bt-layer-measure | 64 of 64 | 100 percent |
+| bin/layer-measure-lib | 204 of 204 | 100 percent |
+| bin/layer-compare-lib | 189 of 189 | 100 percent |
+| bin/layer-report-lib | 230 of 230 | 100 percent |
+| bt-layer-measure | 70 of 70 | 100 percent |
 
-The gate stays at 99, the lowest file rounded down. Both new files are at
+The gate stays at 99, the lowest file rounded down. All four new files are at
 100 percent line and branch: every subcommand, every exit code (0, 1, 2 and
-3) and every error path is exercised, including the comparison itself, where
-`tests/measure` covers a difference inside the noise floor that is real and
-has to be reported (an account row gone from a text state file, and an edited
-account record in a binary one, both at paths whose clocks move in every
-build) as well as a run where nothing was sampled and the measurement fails
-rather than reporting a clean number it could not see.
+3), every verdict and every error path, including the two guards that must
+never fire, which `tests/measure` reaches by replacing `measure_verdict` with
+a stub.
 
-`tests/measure` sets `pipefail` the way `bt-layer-measure` does. Without it
-the suite passed while the executable did not: `measure_signature` inherited
-`cmp`'s "the files differ" status from a pipeline and reported a failure
-instead of a signature, which silently dropped one state path's verdict from
-every report.
+## 2026-09-28: what the first version of the comparison got wrong
+
+Worth recording, because the defect was in the same direction as the one the
+tool exists to correct and the suite did not catch it.
+
+The first implementation compared *positions*: the line numbers or byte
+offsets at which two files differ, subtracting the control pair's set from
+the control-unit set. Two unrelated changes at one position annihilate. Four
+cases came back as `noise`, exit 0, with the evidence suppressed because they
+were noise: an account added to `/etc/shadow` at the line number the control
+pair also appends at; a root password set on the line the control pair
+rewrites for a clock reason; a binary differing at the same eight offsets
+with different byte values; a file 3584 bytes shorter against a control pair
+that varies by one.
+
+`tests/compare` is that list. The controls are now the model and the model
+carries content: at each position the controls vary at, the longest common
+prefix and suffix of their variants is the shape the unit has to fit. A mask
+with nothing in it proves nothing, and bytes carry no shape at all, so a
+binary coincidence is `overlapping` and fails until it is cleared in writing.
+The evidence is printed for every verdict, `noise` included, because the one
+mistake the scheme can still make is the one nobody would otherwise see.
+
+## 2026-09-28: pipefail in the three older suites
+
+`tests/layer`, `tests/aplinfo` and `tests/signature` did not set `pipefail`
+while `bt-layer`, `bt-aplinfo` and `bin/generate-signature` all do, so a
+library function that inherits a pipeline's status fails in production and
+passes in the suite. That is exactly how `measure_signature` shipped broken
+once. All five suites now set it. One assertion had to change with it:
+`tests/signature` piped `generate-signature --help` into `grep`, and usage
+exits non-zero by convention, so the output is captured first.
 
 ## Not measured
 

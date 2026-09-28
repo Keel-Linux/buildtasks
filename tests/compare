@@ -1,0 +1,296 @@
+#!/bin/bash -e
+# Test bin/layer-compare-lib: the part that decides whether a difference at a
+# state path is noise or the change being measured.
+#
+# The rule this suite exists to hold. A token that records only *where* two
+# files differ cancels a real difference against a coincidental one at the
+# same position. Every case below was a false negative of the first
+# implementation, which reported them as noise, printed no evidence and
+# exited 0:
+#
+#   an account added to /etc/shadow at the line number the control pair also
+#   appends at; a root password set on the line the control pair rewrites for
+#   a clock reason; a binary differing at the same offsets as the control pair
+#   but with different byte values; a length change of -3584 bytes against a
+#   control pair that varies by +1.
+#
+# So a position is not enough. The control captures are the model of what
+# varies, and the unit is admitted only if its *content* at that position is
+# the kind of variation the controls show there: the longest common prefix
+# and suffix of the control variants of that line. A mask with neither
+# prefix nor suffix explains nothing and never yields noise, and bytes are
+# never provable at all, so a binary coincidence is `overlapping`, which
+# fails until somebody clears it in writing.
+#
+# Code paths covered:
+#   measure_is_text (text, NUL, no newline, over-long line, missing);
+#   measure_line; measure_common_prefix and measure_common_suffix (none,
+#   partial, whole, one string, empty); measure_text_positions (same,
+#   changed, added, removed); measure_byte_offsets (same, differing, shorter);
+#   measure_pair_positions (text, binary); measure_floor_positions (one pair,
+#   three controls, identical controls); measure_range (single pair, several,
+#   negative); measure_mask_at (common prefix and suffix, prefix only, suffix
+#   only, neither, absent line); measure_mask_admits (matches, too short,
+#   wrong prefix, wrong suffix, empty mask refused);
+#   measure_verdict (text noise; text real outside the floor; text real by
+#   content at a floor position; text real by an added line the mask refuses;
+#   text overlapping on an empty mask; text overlapping over the position
+#   cap; binary overlapping; binary real outside the floor; binary real by
+#   size delta; binary real by differing-byte count; identical controls;
+#   unsampled; a unit identical to the control);
+#   measure_cleared_reason (listed, absent, missing file, comment);
+#   measure_evidence (text, binary, unsampled, always printed for noise).
+
+set -o pipefail
+
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $0
+Test bin/layer-compare-lib without building anything
+EOF
+exit 1
+}
+
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then usage; fi
+
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+source "$BT/bin/layer-measure-lib"
+source "$BT/bin/layer-compare-lib"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+assert_eq() {
+    local label=$1 got=$2 want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+assert_ok() {
+    local label=$1
+    shift
+    "$@" >/dev/null 2>&1 || fatal "$label: should have passed"
+}
+
+assert_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
+
+assert_grep() {
+    local label=$1 pattern=$2 haystack=$3
+    grep -q -- "$pattern" <<<"$haystack" || fatal "$label: no '$pattern' in: $haystack"
+}
+
+# verdict LABEL WANT UNIT CONTROL...
+verdict() {
+    local label=$1 want=$2
+    shift 2
+    local got
+    got=$(measure_verdict "$@") || fatal "$label: measure_verdict failed"
+    assert_eq "$label" "$(cut -f1 <<<"$got")" "$want"
+    printf '%s\n' "$got"
+}
+
+shadow() { # shadow FILE STAMP ACCOUNT...
+    local f=$1 stamp=$2
+    shift 2
+    { echo "# written $stamp"
+      echo "root:!:20000:0:99999:7:::"
+      local a
+      for a in "$@"; do echo "$a"; done
+    } > "$f"
+}
+
+info "1: measure_is_text"
+printf 'one\ntwo\n' > "$tmp/t"
+printf 'a\0b\n' > "$tmp/nul"
+printf 'no trailing newline and no newline at all' > "$tmp/noeol"
+{ head -c 9000 /dev/zero | tr '\0' 'x'; echo; } > "$tmp/longline"
+assert_ok text-plain measure_is_text "$tmp/t"
+assert_fail text-nul measure_is_text "$tmp/nul"
+assert_fail text-nonewline measure_is_text "$tmp/noeol"
+assert_fail text-longline measure_is_text "$tmp/longline"
+assert_fail text-missing measure_is_text "$tmp/absent"
+
+info "2: measure_line, measure_common_prefix and measure_common_suffix"
+assert_eq line-1 "$(measure_line 1 "$tmp/t")" one
+assert_eq line-2 "$(measure_line 2 "$tmp/t")" two
+assert_eq line-absent "$(measure_line 9 "$tmp/t")" ""
+assert_eq prefix-some "$(measure_common_prefix "# written 1" "# written 2")" "# written "
+assert_eq prefix-none "$(measure_common_prefix abc xyz)" ""
+assert_eq prefix-whole "$(measure_common_prefix abc abc)" abc
+assert_eq prefix-one "$(measure_common_prefix abc)" abc
+assert_eq prefix-empty "$(measure_common_prefix "" abc)" ""
+assert_eq suffix-some "$(measure_common_suffix "a:!!:20000" "bb:!!:20000")" ":!!:20000"
+assert_eq suffix-none "$(measure_common_suffix abc xyz)" ""
+assert_eq suffix-whole "$(measure_common_suffix abc abc)" abc
+assert_eq suffix-one "$(measure_common_suffix abc)" abc
+
+info "3: measure_text_positions and measure_byte_offsets"
+printf 'one\ntwo\nthree\n' > "$tmp/a"
+printf 'one\nTWO\nthree\n' > "$tmp/b"
+printf 'one\ntwo\nthree\nfour\n' > "$tmp/c"
+printf 'one\nthree\n' > "$tmp/d"
+assert_eq pos-same "$(measure_text_positions "$tmp/a" "$tmp/a")" ""
+assert_eq pos-changed "$(measure_text_positions "$tmp/a" "$tmp/b")" "$(printf 'n2\no2')"
+assert_eq pos-added "$(measure_text_positions "$tmp/a" "$tmp/c")" "n4"
+assert_eq pos-removed "$(measure_text_positions "$tmp/a" "$tmp/d")" "o2"
+printf 'AAAA' > "$tmp/ba"
+printf 'AABA' > "$tmp/bb"
+printf 'AAA' > "$tmp/bc"
+assert_eq off-same "$(measure_byte_offsets "$tmp/ba" "$tmp/ba")" ""
+assert_eq off-one "$(measure_byte_offsets "$tmp/ba" "$tmp/bb")" 3
+assert_eq off-shorter "$(measure_byte_offsets "$tmp/ba" "$tmp/bc")" ""
+assert_fail off-missing measure_byte_offsets "$tmp/ba" "$tmp/absent"
+
+info "4: measure_floor_positions over every control pair"
+shadow "$tmp/c1" 1000 "mysql:!!:1:::"
+shadow "$tmp/c2" 2000 "mysql:!!:1:::"
+shadow "$tmp/c3" 3000 "mysql:!!:1:::"
+assert_eq floor-pair "$(measure_floor_positions text "$tmp/c1" "$tmp/c2")" "$(printf 'n1\no1')"
+assert_eq floor-three "$(measure_floor_positions text "$tmp/c1" "$tmp/c2" "$tmp/c3")" "$(printf 'n1\no1')"
+assert_eq floor-identical "$(measure_floor_positions text "$tmp/c1" "$tmp/c1")" ""
+assert_eq floor-binary "$(measure_floor_positions binary "$tmp/ba" "$tmp/bb")" 3
+
+info "5: measure_range"
+assert_eq range-size "$(measure_range size "$tmp/c1" "$tmp/c2" "$tmp/c3")" "0 0"
+printf '12345' > "$tmp/s5"
+printf '123456' > "$tmp/s6"
+printf '1' > "$tmp/s1"
+assert_eq range-grow "$(measure_range size "$tmp/s5" "$tmp/s6")" "-1 1"
+assert_eq range-both "$(measure_range size "$tmp/s5" "$tmp/s6" "$tmp/s1")" "-5 5"
+assert_eq range-bytes "$(measure_range bytes "$tmp/ba" "$tmp/bb")" "1 1"
+
+info "6: measure_mask_at and measure_mask_admits"
+m=$(measure_mask_at 1 "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_eq mask-prefix "$(cut -d"$(printf '\001')" -f1 <<<"$m")" "# written "
+assert_eq mask-suffix "$(cut -d"$(printf '\001')" -f2 <<<"$m")" "000"
+printf 'aaaZZZ\n' > "$tmp/p1"; printf 'aaaYYY\n' > "$tmp/p2"
+assert_eq mask-prefixonly "$(measure_mask_at 1 "$tmp/p1" "$tmp/p2")" "$(printf 'aaa\001')"
+printf 'ZZZaaa\n' > "$tmp/q1"; printf 'YYYaaa\n' > "$tmp/q2"
+assert_eq mask-suffixonly "$(measure_mask_at 1 "$tmp/q1" "$tmp/q2")" "$(printf '\001aaa')"
+printf 'abc\n' > "$tmp/r1"; printf 'xyz\n' > "$tmp/r2"
+assert_eq mask-neither "$(measure_mask_at 1 "$tmp/r1" "$tmp/r2")" "$(printf '\001')"
+assert_ok admits-yes measure_mask_admits "# written 4000" "# written " "000"
+assert_fail admits-prefix measure_mask_admits "root:x:0" "# written " ""
+assert_fail admits-suffix measure_mask_admits "# written 4242" "# written " "000"
+assert_fail admits-short measure_mask_admits "# wr" "# written " ""
+assert_fail admits-emptymask measure_mask_admits "anything at all" "" ""
+
+# ---------------------------------------------------------------------------
+# the verdicts, and the four false negatives that made this rewrite necessary
+# ---------------------------------------------------------------------------
+
+info "7: a clock that moves in every build is noise"
+shadow "$tmp/u-clock" 4000 "mysql:!!:1:::"
+v=$(verdict clock noise "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_grep clock-why "mask" "$v"
+
+info "8: an account added where the control pair also appends is NOT noise"
+# the control pair appends a different account at the same line number, so
+# the position cancels; only the content tells them apart
+shadow "$tmp/ac1" 1000 "mysql:!!:1:::" "alice:!!:20000:0:99999:7:::"
+shadow "$tmp/ac2" 2000 "mysql:!!:1:::" "bob:!!:20000:0:99999:7:::"
+# shellcheck disable=SC2016  # a literal crypt hash, not an expansion
+shadow "$tmp/au"  3000 "mysql:!!:1:::" 'mallory:$y$REALPASSWORDHASH:20000:::'
+v=$(verdict added-account real "$tmp/au" "$tmp/ac1" "$tmp/ac2")
+assert_grep added-account-why "line 4" "$v"
+
+info "9: a root password set on the line the floor rewrites is NOT noise"
+printf '# written 1000\nroot:!:20000:0:99999:7:::\n' > "$tmp/rc1"
+printf '# written 2000\nroot:!:20000:0:99999:7:::\n' > "$tmp/rc2"
+# shellcheck disable=SC2016  # a literal crypt hash, not an expansion
+printf 'root:$y$REALHASH:20000:0:99999:7:::\nroot:!:20000:0:99999:7:::\n' > "$tmp/ru"
+verdict root-password real "$tmp/ru" "$tmp/rc1" "$tmp/rc2" >/dev/null
+
+info "10: a binary coinciding with the floor is overlapping, never noise"
+bin() { printf 'HDR\0%s\0%s' "$2" "$3" > "$1"; }
+bin "$tmp/kc1" AAAAAAAA root@localhost
+bin "$tmp/kc2" BBBBBBBB root@localhost
+bin "$tmp/ku"  CCCCCCCC root@localhost
+v=$(verdict binary-coincide overlapping "$tmp/ku" "$tmp/kc1" "$tmp/kc2")
+assert_grep binary-why "byte" "$v"
+bin "$tmp/ku2" AAAAAAAA root@localhosX
+verdict binary-outside real "$tmp/ku2" "$tmp/kc1" "$tmp/kc2" >/dev/null
+# every control pair differs at the same eight bytes, so a unit differing at
+# only four of them is inside the floor by position and outside it by
+# magnitude, which is the only handle a binary offers
+bin "$tmp/kc3" CCCCCCCC root@localhost
+bin "$tmp/ku3" AAAADDDD root@localhost
+v=$(verdict binary-count real "$tmp/ku3" "$tmp/kc1" "$tmp/kc2" "$tmp/kc3")
+assert_grep binary-count-why "bytes differ where the controls" "$v"
+
+info "11: a length change the floor does not show is NOT noise"
+head -c 4096 /dev/zero | tr '\0' 'x' > "$tmp/lc1"
+{ head -c 4096 /dev/zero | tr '\0' 'x'; printf 'y'; } > "$tmp/lc2"
+head -c 512 /dev/zero | tr '\0' 'x' > "$tmp/lu"
+v=$(verdict length-outside real "$tmp/lu" "$tmp/lc1" "$tmp/lc2")
+assert_grep length-why "size" "$v"
+
+info "12: a mask that explains nothing never yields noise"
+printf 'abc\n' > "$tmp/ec1"; printf 'xyz\n' > "$tmp/ec2"; printf 'pqr\n' > "$tmp/eu"
+verdict empty-mask overlapping "$tmp/eu" "$tmp/ec1" "$tmp/ec2" >/dev/null
+# the NUL-free, newline-free blob that used to collapse to one line
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/bl1"
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/bl2"
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/blu"
+v=$(measure_verdict "$tmp/blu" "$tmp/bl1" "$tmp/bl2")
+[[ "$(cut -f1 <<<"$v")" != noise ]] || fatal "blob: a newline-free blob came back as noise"
+
+info "13: identical controls leave no floor, so any difference is real"
+verdict no-floor real "$tmp/u-clock" "$tmp/c1" "$tmp/c1" >/dev/null
+
+info "14: a unit identical to the control has nothing to report"
+v=$(verdict identical none "$tmp/c1" "$tmp/c1" "$tmp/c2")
+assert_grep identical-why "identical" "$v"
+
+info "15: unsampled"
+verdict unsampled-unit unsampled "$tmp/absent" "$tmp/c1" "$tmp/c2" >/dev/null
+verdict unsampled-control unsampled "$tmp/c1" "$tmp/absent" "$tmp/c2" >/dev/null
+assert_fail verdict-nocontrol measure_verdict "$tmp/c1"
+
+info "16: too many differing positions to mask"
+saved=$MEASURE_POSITION_MAX
+MEASURE_POSITION_MAX=2
+seq 1 20 | sed 's/$/ a/' > "$tmp/mc1"
+seq 1 20 | sed 's/$/ b/' > "$tmp/mc2"
+seq 1 20 | sed 's/$/ c/' > "$tmp/mu"
+v=$(verdict position-cap overlapping "$tmp/mu" "$tmp/mc1" "$tmp/mc2")
+assert_grep position-cap-why "too many" "$v"
+MEASURE_POSITION_MAX=$saved
+
+info "17: measure_cleared_reason"
+cat > "$tmp/cleared" <<'EOF'
+# a waiver is committed, and the report prints it
+./var/lib/mysql/ibdata1	InnoDB creation stamps, checked by hand on 2026-09-28
+EOF
+assert_eq cleared-hit "$(measure_cleared_reason "$tmp/cleared" ./var/lib/mysql/ibdata1)" \
+    "InnoDB creation stamps, checked by hand on 2026-09-28"
+assert_eq cleared-miss "$(measure_cleared_reason "$tmp/cleared" ./etc/shadow)" ""
+assert_eq cleared-nofile "$(measure_cleared_reason "$tmp/absent" ./etc/shadow)" ""
+# a glob waiver, because a real data directory is 173 files and one sentence
+printf './var/lib/postgresql/**\tinitdb output, read on 2026-09-28\n' >> "$tmp/cleared"
+assert_eq cleared-glob "$(measure_cleared_reason "$tmp/cleared" ./var/lib/postgresql/17/main/PG_VERSION)" \
+    "initdb output, read on 2026-09-28"
+assert_eq cleared-glob-miss "$(measure_cleared_reason "$tmp/cleared" ./var/lib/other/x)" ""
+
+info "18: measure_evidence is printed for every verdict, noise included"
+e=$(measure_evidence ./etc/shadow "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_grep evidence-noise-unit "control vs unit" "$e"
+assert_grep evidence-noise-floor "control vs control" "$e"
+assert_grep evidence-noise-content "written" "$e"
+e=$(measure_evidence ./k "$tmp/ku" "$tmp/kc1" "$tmp/kc2")
+assert_grep evidence-binary "offset" "$e"
+assert_grep evidence-binary-size "size" "$e"
+e=$(measure_evidence ./x "$tmp/absent" "$tmp/c1" "$tmp/c2")
+assert_grep evidence-unsampled "not sampled" "$e"
+
+echo
+info "all tests passed"

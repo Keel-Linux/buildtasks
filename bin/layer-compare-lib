@@ -1,0 +1,394 @@
+#!/bin/bash
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# Deciding whether a difference at a state path is noise or the change being
+# measured. Sourced by bt-layer-measure after bin/layer-measure-lib.
+#
+# Why this is not a set of differing positions minus another set of differing
+# positions. That was the first implementation and it cancelled a real
+# difference against a coincidental one at the same place: an account added
+# to /etc/shadow at the line number the control pair also appends at, a root
+# password set on the line the control pair rewrites for a clock reason, a
+# binary differing at the same offsets with different byte values, a file
+# 3584 bytes shorter where the control pair varies by one. All four came back
+# as noise, with the evidence suppressed because they were noise.
+#
+# So the control captures are the model, and the model has content in it. At
+# each position the controls vary at, the longest common prefix and suffix of
+# their variants is the shape of that variation; the unit is admitted only if
+# its line has that shape. A mask with neither a prefix nor a suffix explains
+# nothing, so it never yields noise. Bytes carry no shape at all, so a binary
+# coincidence is never noise either: it is `overlapping`, which fails until
+# somebody clears it in writing.
+#
+# Three or more control captures make the model better, because the floor is
+# the union over every control pair and the magnitudes are a range rather
+# than a single value.
+
+# A line longer than this, or a file with no newline at all, is not text: a
+# newline-free blob is one line, and one line masks against anything.
+MEASURE_TEXT_MAX_LINE=8192
+
+# Above this many differing positions the masking is abandoned and the path
+# is reported as overlapping rather than guessed at.
+MEASURE_POSITION_MAX=200
+
+# The field separator inside a mask, which cannot occur in a text line.
+MEASURE_MASK_SEP=$'\001'
+
+# How many lines of a diff the evidence block prints per pair, and how many
+# paths get a full three-way diff before the rest are abbreviated to their
+# summary line. Every `real` path is always printed in full. Both are read
+# by bin/layer-report-lib.
+# shellcheck disable=SC2034
+MEASURE_EVIDENCE_LINES=20
+# shellcheck disable=SC2034
+MEASURE_EVIDENCE_PATHS=20
+
+# ---------------------------------------------------------------------------
+# primitives
+# ---------------------------------------------------------------------------
+
+# measure_is_text FILE
+# No NUL, at least one newline, and no line long enough to be a blob.
+measure_is_text() {
+    local f=$1
+    if [[ ! -f "$f" ]]; then
+        measure_error "no such file: $f"
+        return 1
+    fi
+    local all stripped
+    all=$(wc -c < "$f")
+    stripped=$(tr -d '\0' < "$f" | wc -c)
+    [[ "$all" == "$stripped" ]] || return 1
+    [[ "$(tr -dc '\n' < "$f" | wc -c)" -gt 0 ]] || return 1
+    [[ "$(wc -L < "$f")" -le "$MEASURE_TEXT_MAX_LINE" ]] || return 1
+    return 0
+}
+
+# measure_line N FILE
+measure_line() {
+    sed -n "$1{p;q}" "$2"
+}
+
+# measure_common_prefix STRING...
+measure_common_prefix() {
+    local out=$1 s i
+    shift
+    for s in "$@"; do
+        i=0
+        while [[ $i -lt ${#out} ]] && [[ "${s:$i:1}" == "${out:$i:1}" ]]; do
+            i=$((i + 1))
+        done
+        out=${out:0:$i}
+        [[ -n "$out" ]] || break
+    done
+    printf '%s\n' "$out"
+}
+
+# measure_common_suffix STRING...
+measure_common_suffix() {
+    local out=$1 s i
+    shift
+    for s in "$@"; do
+        i=0
+        while [[ $i -lt ${#out} ]] && [[ "${s: -$((i + 1)):1}" == "${out: -$((i + 1)):1}" ]]; do
+            i=$((i + 1))
+        done
+        out=${out: ${#out}-$i}
+        [[ -n "$out" ]] || break
+    done
+    printf '%s\n' "$out"
+}
+
+# measure_text_positions A B -> o<n> for a line of A that moved, n<n> for a
+# line of B that is not in A where it was
+measure_text_positions() {
+    diff --old-line-format=$'o%dn\n' --new-line-format=$'n%dn\n' \
+        --unchanged-line-format='' -- "$1" "$2" | LC_ALL=C sort -u
+    return 0
+}
+
+# measure_byte_offsets A B -> the 1-based offsets differing in the common
+# prefix of the two files, one per line
+measure_byte_offsets() {
+    if [[ ! -f "$1" ]] || [[ ! -f "$2" ]]; then
+        measure_error "cannot compare $1 with $2: one of them is not a file"
+        return 1
+    fi
+    cmp -l -- "$1" "$2" 2>/dev/null | awk '{ print $1 }' || true
+    return 0
+}
+
+# measure_pair_positions KIND A B
+measure_pair_positions() {
+    if [[ "$1" == text ]]; then
+        measure_text_positions "$2" "$3"
+        return 0
+    fi
+    measure_byte_offsets "$2" "$3"
+}
+
+# measure_floor_positions KIND CONTROL... -> the union over every unordered
+# pair of control captures. Three controls give three pairs, which is the
+# point of allowing more than two.
+measure_floor_positions() {
+    local kind=$1
+    shift
+    local -a c=("$@")
+    local i j all=""
+    for i in $(seq 0 $(( ${#c[@]} - 1 ))); do
+        for j in $(seq $(( i + 1 )) $(( ${#c[@]} - 1 ))); do
+            all+=$(measure_pair_positions "$kind" "${c[$i]}" "${c[$j]}")$'\n'
+        done
+    done
+    [[ -n "${all//[$'\n']/}" ]] || return 0
+    LC_ALL=C sort -u <<<"$all" | grep .
+    return 0
+}
+
+# measure_range size|bytes CONTROL... -> "MIN MAX" over every ordered pair of
+# distinct controls, of the size delta or of the number of differing bytes.
+# Ordered, so the range is symmetric: which control is written first is an
+# accident of the command line and must not decide whether the unit fits.
+measure_range() {
+    local what=$1
+    shift
+    local -a c=("$@")
+    local i j v min="" max=""
+    for i in $(seq 0 $(( ${#c[@]} - 1 ))); do
+        for j in $(seq 0 $(( ${#c[@]} - 1 ))); do
+            [[ $i -ne $j ]] || continue
+            if [[ "$what" == size ]]; then
+                v=$(( $(wc -c < "${c[$j]}") - $(wc -c < "${c[$i]}") ))
+            else
+                v=$(measure_byte_offsets "${c[$i]}" "${c[$j]}" | grep -c . || true)
+            fi
+            [[ -n "$min" ]] && [[ "$v" -ge "$min" ]] || min=$v
+            [[ -n "$max" ]] && [[ "$v" -le "$max" ]] || max=$v
+        done
+    done
+    printf '%s %s\n' "${min:-0}" "${max:-0}"
+}
+
+# measure_mask_at N CONTROL... -> PREFIX<SEP>SUFFIX, the shape the controls
+# show at line N
+measure_mask_at() {
+    local n=$1
+    shift
+    local -a lines=()
+    local f
+    for f in "$@"; do
+        lines+=("$(measure_line "$n" "$f")")
+    done
+    printf '%s%s%s\n' \
+        "$(measure_common_prefix "${lines[@]}")" \
+        "$MEASURE_MASK_SEP" \
+        "$(measure_common_suffix "${lines[@]}")"
+}
+
+# measure_mask_admits LINE PREFIX SUFFIX
+# A mask with neither a prefix nor a suffix admits nothing: it is what two
+# unrelated lines have in common, which is no evidence about a third.
+measure_mask_admits() {
+    local line=$1 prefix=$2 suffix=$3
+    [[ -n "$prefix" ]] || [[ -n "$suffix" ]] || return 1
+    [[ ${#line} -ge $(( ${#prefix} + ${#suffix} )) ]] || return 1
+    [[ "$line" == "$prefix"* ]] || return 1
+    [[ -z "$suffix" ]] || [[ "$line" == *"$suffix" ]] || return 1
+    return 0
+}
+
+# measure_cleared_reason FILE PATH -> the reason a waiver gives, or nothing
+#
+# A waiver line is PATH<TAB>REASON, and PATH may be a glob, because a real
+# MariaDB data directory is 173 files that one sentence explains. A glob
+# waiver is only honest because the report names every path it covered, so
+# it is a record of what was waived and not a way of not looking.
+measure_cleared_reason() {
+    local file=$1 path=$2 rule reason line
+    [[ -f "$file" ]] || return 0
+    local -a rules=()
+    mapfile -t rules < "$file"
+    for line in "${rules[@]}"; do
+        IFS=$'\t' read -r rule reason <<<"$line"
+        [[ -n "$rule" ]] || continue
+        [[ "$rule" != \#* ]] || continue
+        # shellcheck disable=SC2053
+        if [[ "$path" == "$rule" ]] || [[ "$path" == $rule ]]; then
+            printf '%s\n' "$reason"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# the verdict
+# ---------------------------------------------------------------------------
+
+# measure_verdict UNIT CONTROL... -> verdict<TAB>why
+#
+#   none         the unit is byte identical to the control
+#   noise        every difference is at a position the controls vary at and
+#                has the shape the controls show there
+#   overlapping  every difference coincides with the controls' variation but
+#                its content cannot be shown to be that variation; bytes
+#                never can, and neither can a mask with nothing in it
+#   real         it differs where the controls do not vary, or with content
+#                or a magnitude they do not show
+#   unsampled    some side has no bytes, so nothing can be said
+measure_verdict() {
+    local unit=$1
+    shift
+    if [[ $# -lt 1 ]]; then
+        measure_error "measure_verdict needs a unit sample and at least one control"
+        return 1
+    fi
+    local f
+    for f in "$unit" "$@"; do
+        if [[ ! -f "$f" ]]; then
+            printf 'unsampled\t%s\n' \
+                "no bytes kept for $f, so neither noise nor a real difference can be shown"
+            return 0
+        fi
+    done
+    local base=$1
+    if cmp -s -- "$base" "$unit"; then
+        printf 'none\t%s\n' "identical to the control"
+        return 0
+    fi
+    local kind=binary
+    if measure_is_text "$base" && measure_is_text "$unit"; then
+        kind=text
+    fi
+    local floor unit_pos outside n
+    floor=$(measure_floor_positions "$kind" "$@")
+    unit_pos=$(measure_pair_positions "$kind" "$base" "$unit")
+    outside=$(measure_set_minus "$unit_pos" "$floor")
+    if [[ -n "$outside" ]]; then
+        printf 'real\t%s\n' \
+            "differs where the controls do not vary: $(measure_nature_list "$outside")"
+        return 0
+    fi
+    if [[ "$kind" == binary ]]; then
+        measure_verdict_binary "$unit" "$@"
+        return 0
+    fi
+    n=$(grep -c . <<<"$unit_pos" || true)
+    if [[ "$n" -gt "$MEASURE_POSITION_MAX" ]]; then
+        printf 'overlapping\t%s\n' \
+            "$n differing positions, too many to mask (the cap is $MEASURE_POSITION_MAX); read the evidence"
+        return 0
+    fi
+    measure_verdict_text "$unit_pos" "$unit" "$@"
+}
+
+# measure_verdict_text POSITIONS UNIT CONTROL...
+measure_verdict_text() {
+    local positions=$1 unit=$2
+    shift 2
+    local token n mask prefix suffix line unexplained=0 masked=0
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        n=${token#[on]}
+        mask=$(measure_mask_at "$n" "$@")
+        prefix=${mask%%"$MEASURE_MASK_SEP"*}
+        suffix=${mask#*"$MEASURE_MASK_SEP"}
+        line=$(measure_line "$n" "$unit")
+        if measure_mask_admits "$line" "$prefix" "$suffix"; then
+            masked=$((masked + 1))
+            continue
+        fi
+        if [[ -z "$prefix" ]] && [[ -z "$suffix" ]]; then
+            printf 'overlapping\t%s\n' \
+                "line $n varies in the controls with nothing in common, so nothing about it can be shown; read the evidence"
+            return 0
+        fi
+        unexplained=$((unexplained + 1))
+        printf 'real\t%s\n' \
+            "line $n does not have the shape the controls vary with there (prefix '$prefix', suffix '$suffix')"
+        return 0
+    done <<<"$positions"
+    printf 'noise\t%s\n' \
+        "$masked differing lines, every one of them matching the mask the controls establish at that line"
+    return 0
+}
+
+# measure_verdict_binary UNIT CONTROL...
+# Bytes carry no shape, so the best this can say is that the unit coincides
+# with the controls in position, in size delta and in how much differs.
+measure_verdict_binary() {
+    local unit=$1 base=$2
+    shift
+    local delta count dmin dmax cmin cmax
+    read -r dmin dmax < <(measure_range size "$@")
+    read -r cmin cmax < <(measure_range bytes "$@")
+    delta=$(( $(wc -c < "$unit") - $(wc -c < "$base") ))
+    count=$(measure_byte_offsets "$base" "$unit" | grep -c . || true)
+    if [[ "$delta" -lt "$dmin" ]] || [[ "$delta" -gt "$dmax" ]]; then
+        printf 'real\t%s\n' \
+            "size moves by $delta bytes where the controls move by $dmin to $dmax"
+        return 0
+    fi
+    if [[ "$count" -lt "$cmin" ]] || [[ "$count" -gt "$cmax" ]]; then
+        printf 'real\t%s\n' \
+            "$count bytes differ where the controls differ by $cmin to $cmax"
+        return 0
+    fi
+    printf 'overlapping\t%s\n' \
+        "$count bytes at offsets the controls also vary at, size delta $delta within $dmin to $dmax; bytes carry no shape, so this is a coincidence nobody has ruled out"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# evidence, printed for every verdict including noise
+# ---------------------------------------------------------------------------
+
+# measure_evidence PATH UNIT CONTROL...
+measure_evidence() {
+    local path=$1 unit=$2
+    shift 2
+    local base=$1 f
+    echo "  $path"
+    for f in "$unit" "$@"; do
+        if [[ ! -f "$f" ]]; then
+            echo "    not sampled: $f is absent, raise --state-max-bytes and capture again"
+            return 0
+        fi
+    done
+    echo "    control vs unit:"
+    measure_pair_evidence "$base" "$unit"
+    local i=2
+    for f in "$@"; do
+        [[ "$f" != "$base" ]] || continue
+        echo "    control vs control $i (the floor at this path):"
+        measure_pair_evidence "$base" "$f"
+        i=$((i + 1))
+    done
+    return 0
+}
+
+# measure_pair_evidence A B
+measure_pair_evidence() {
+    local a=$1 b=$2
+    if measure_is_text "$a" && measure_is_text "$b"; then
+        diff -u --label control --label other -- "$a" "$b" \
+            | tail -n +3 | head -n "$MEASURE_EVIDENCE_LINES" | sed 's/^/      /' || true
+        return 0
+    fi
+    local all n offsets
+    all=$(measure_byte_offsets "$a" "$b")
+    n=$(grep -c . <<<"$all" || true)
+    offsets=$(head -n "$MEASURE_LIST_MAX" <<<"$all" | paste -sd, - || true)
+    printf '      sizes %s and %s; differing bytes: %s; first offsets: %s\n' \
+        "$(wc -c < "$a")" "$(wc -c < "$b")" "$n" "${offsets:-none}"
+    return 0
+}

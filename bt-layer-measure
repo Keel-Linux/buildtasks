@@ -15,6 +15,16 @@ APP=$(basename "$0")
 BT=${BT:-$(dirname "$(readlink -f "$0")")}
 # shellcheck source=bin/layer-measure-lib
 source "$BT/bin/layer-measure-lib"
+# shellcheck source=bin/layer-compare-lib
+source "$BT/bin/layer-compare-lib"
+# shellcheck source=bin/layer-report-lib
+source "$BT/bin/layer-report-lib"
+
+# bt-layer learns BT_BUILDS from this file, so this reads it the same way
+# rather than disagreeing with the builder about where the rootfs landed.
+BT_CONFIG=${BT_CONFIG:-$BT/config}
+# shellcheck disable=SC1091
+[[ ! -f "$BT_CONFIG/common.cfg" ]] || source "$BT_CONFIG/common.cfg"
 
 EXIT_DIFFERENCES=1
 EXIT_USAGE=2
@@ -29,14 +39,22 @@ usage() {
 Syntax: $APP capture   --dir DIR --layer NAME [--parent NAME] --tag TAG
                        [--state-max-bytes N]
         $APP compare   --dir DIR --a TAG --b TAG
-        $APP attribute --dir DIR --control TAG --unit TAG --control-again TAG
+        $APP attribute --dir DIR --unit TAG --control TAG
+                       --control-again TAG [--control-again TAG]...
+                       [--cleared FILE]
 
-Builds a layer and records what it contains, then says what two or three of
-those records differ by. This is the three-build comparison handbook decision
-0010 step 3 requires of every component extracted from the shared tree:
-a control build, the same recipe with the component supplied as a fab unit,
-and the control again, because without the third build a difference cannot be
-attributed to anything.
+Builds a layer and records what it contains, then says what those records
+differ by. This is the three-build comparison handbook decision 0010 step 3
+requires of every component extracted from the shared tree: a control build,
+the same recipe with the component supplied as a fab unit, and the control
+again, because without a second control a difference cannot be attributed to
+anything.
+
+Give more than one --control-again. Two builds of one recipe do not differ by
+a fixed set: on the mariadb captures of 2026-09-27 one control pair differs by
+179 files and another by 182, and the attributable count is 3 against the
+first and 0 against the second. The floor is the union over every control
+pair, so each extra control build narrows what this command will call noise.
 
 Subcommands::
 
@@ -66,20 +84,48 @@ Options::
     --a, --b TAG        the two captures compare reads
     --control TAG       the control build
     --unit TAG          the build with the component supplied as a unit
-    --control-again TAG the second control build, which is what makes a
-                        difference attributable
+    --control-again TAG another control build. Repeatable, and the floor is
+                        the union over every pair of controls
+    --cleared FILE      waivers: lines of PATH<TAB>REASON. A state path whose
+                        difference coincides with the floor but cannot be
+                        shown to be that variation is 'overlapping' and fails
+                        the run; a waiver clears it and prints the reason in
+                        the block, so the judgement is on the record. A
+                        waiver cannot clear a 'real' difference
 
 Environment::
 
-    MEASURE_STATE_PATHS the list of state path globs
-                        (default \$BT/share/layer-state-paths)
+    MEASURE_STATE_PATHS the list of state path globs a *capture* is taken
+                        against (default \$BT/share/layer-state-paths). The
+                        list is copied into each capture and 'attribute'
+                        reads the copy, never this variable, so what a
+                        measurement was blind to cannot be changed after the
+                        fact
+    MEASURE_SUSPECT_PATHS
+                        names that look like state (default
+                        \$BT/share/layer-state-suspect). A path the floor
+                        subtracted whose name matches one of these, and which
+                        no state path glob covers, fails the run
     MEASURE_BT_LAYER    the builder to run (default \$BT/bt-layer)
-    MEASURE_LAYERS_DIR  where the builder leaves \$layer.rootfs
-                        (default /mnt/builds/layers)
+    BT_BUILDS           bt-layer's output root; \$BT_BUILDS/layers is where
+                        the built rootfs is read from, and bt-layer itself
+                        refuses to run without it
+    MEASURE_LAYERS_DIR  overrides \$BT_BUILDS/layers
     MEASURE_LOCK        the build lock (default /run/lock/keel-build.lock)
     MEASURE_LOCK_WAIT   seconds to wait for it (default 7200)
     SOURCE_DATE_EPOCH   passed through to the builder and recorded; the three
                         builds must share it or nothing below means anything
+
+Verdicts on a state path::
+
+    noise               every difference is at a position the controls vary
+                        at and has the shape they vary with there
+    overlapping         it coincides with the controls' variation but cannot
+                        be shown to be that variation; bytes never can be, so
+                        a binary is never noise. Fails unless cleared
+    real                it differs where the controls do not vary, or with
+                        content or a magnitude they never show
+    not sampled         no bytes were kept, so nothing can be said. Fails
 
 Exit status::
 
@@ -92,8 +138,16 @@ Documentation: docs/layer-measure.md
 EOF
 }
 
+# The list of state path globs a capture is taken against. Only capture
+# consults it: attribute reads the copy each capture carries, so the
+# blindness of a measurement cannot be switched off after the fact by an
+# environment variable while the printed block still looks provenanced.
 state_paths_file() {
     printf '%s\n' "${MEASURE_STATE_PATHS:-$BT/share/layer-state-paths}"
+}
+
+suspect_paths_file() {
+    printf '%s\n' "${MEASURE_SUSPECT_PATHS:-$BT/share/layer-state-suspect}"
 }
 
 do_capture() {
@@ -106,14 +160,20 @@ do_capture() {
     globs=$(measure_state_patterns "$globs_file") || die "$EXIT_INPUT" "no usable state path list"
 
     local builder=${MEASURE_BT_LAYER:-$BT/bt-layer}
-    local layers=${MEASURE_LAYERS_DIR:-/mnt/builds/layers}
+    if [[ -z "${MEASURE_LAYERS_DIR:-}" ]] && [[ -z "${BT_BUILDS:-}" ]]; then
+        die "$EXIT_INPUT" "BT_BUILDS is not set and $BT_CONFIG/common.cfg did not set it; bt-layer refuses to run without it, so export it or set MEASURE_LAYERS_DIR"
+    fi
+    local layers=${MEASURE_LAYERS_DIR:-$BT_BUILDS/layers}
     local lock=${MEASURE_LOCK:-/run/lock/keel-build.lock}
     local lock_wait=${MEASURE_LOCK_WAIT:-7200}
     local argv=("$builder")
     [[ -z "$MEASURE_PARENT" ]] || argv+=(--parent "$MEASURE_PARENT")
     argv+=("$MEASURE_LAYER")
 
+    mkdir -p "$MEASURE_DIR"
+    chmod 700 "$MEASURE_DIR"
     mkdir -p "$dest"
+    chmod 700 "$dest"
     info "$MEASURE_TAG: ${argv[*]}, waiting up to ${lock_wait}s for $lock"
     if ! flock -w "$lock_wait" "$lock" "${argv[@]}" > "$dest/build.log" 2>&1; then
         tail -n 20 "$dest/build.log" 1>&2
@@ -131,6 +191,9 @@ do_capture() {
     measure_pkgs_record "$rootfs" > "$dest/pkgs.tsv" \
         || die "$EXIT_INPUT" "could not record the package list of $rootfs"
     measure_state_sample "$rootfs" "$dest/tree.tsv" "$dest" "$MEASURE_CAP" "$globs"
+    # the list travels with the capture, so attribute never has to be told
+    # which one was used and cannot be told a different one
+    cp -- "$globs_file" "$dest/state-paths.txt"
 
     if [[ -f "$layers/$MEASURE_LAYER.manifest" ]]; then
         cp -- "$layers/$MEASURE_LAYER.manifest" "$dest/manifest.txt"
@@ -166,15 +229,12 @@ do_compare() {
 }
 
 do_attribute() {
-    local tag
-    for tag in "$MEASURE_CONTROL" "$MEASURE_UNIT" "$MEASURE_CONTROL2"; do
-        measure_capture_check "$MEASURE_DIR/$tag" || die "$EXIT_INPUT" "no complete capture $tag in $MEASURE_DIR"
-    done
-    local globs_file globs
-    globs_file=$(state_paths_file)
-    globs=$(measure_state_patterns "$globs_file") || die "$EXIT_INPUT" "no usable state path list"
-    measure_attribute_report "$MEASURE_DIR" "$MEASURE_CONTROL" "$MEASURE_UNIT" \
-        "$MEASURE_CONTROL2" "$globs" "$globs_file" || exit "$EXIT_DIFFERENCES"
+    measure_preconditions "$MEASURE_DIR" "$MEASURE_UNIT" \
+        "$MEASURE_CONTROL" "${MEASURE_CONTROL2[@]}" \
+        || die "$EXIT_INPUT" "the captures cannot be compared"
+    measure_attribute_report "$MEASURE_DIR" "$MEASURE_UNIT" \
+        "${MEASURE_CLEARED:-/nonexistent}" "$(suspect_paths_file)" \
+        "$MEASURE_CONTROL" "${MEASURE_CONTROL2[@]}" || exit "$EXIT_DIFFERENCES"
 }
 
 measure_parse_args "$@" || { usage 1>&2; exit "$EXIT_USAGE"; }

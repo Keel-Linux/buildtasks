@@ -46,11 +46,13 @@ EOF
 exit 1
 }
 
-[[ "${1:-}" != "-h" ]] && [[ "${1:-}" != "--help" ]] || usage
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then usage; fi
 
 BT=$(dirname "$(dirname "$(readlink -f "$0")")")
 export BT
 source "$BT/bin/layer-measure-lib"
+source "$BT/bin/layer-compare-lib"
+source "$BT/bin/layer-report-lib"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -132,6 +134,9 @@ make_rootfs() {
       printf '\x00\x00'
       printf '%s' "$account"
     } > "$dir/var/lib/mysql/mysql/global_priv.MAD"
+    # a state file whose bytes never change, so a mode-only difference can
+    # be told apart from a content one
+    echo "fixed" > "$dir/var/lib/mysql/fixed.cnf"
     # a state file large enough to run past a small sample cap
     head -c 512 /dev/zero | tr '\0' "$priv" > "$dir/var/lib/mysql/ibdata1"
     cat > "$dir/var/lib/dpkg/status" <<EOF
@@ -158,15 +163,19 @@ mkdir -p "$fix"
 # control, and control again: the clocks move, nothing else does
 make_rootfs "$fix/c1" 1790475089 "mysql daemon" 8 "root@localhost" "first"  ""
 make_rootfs "$fix/c2" 1790475323 "mysql daemon" 9 "root@localhost" "second" ""
+make_rootfs "$fix/c3" 1790475400 "mysql daemon" 5 "root@localhost" "third-c" ""
 # a clean unit: the same clocks move and nothing else does
-make_rootfs "$fix/u1" 1790475511 "mysql daemon" 7 "root@localhost" "third"  ""
+make_rootfs "$fix/u1" 1790475511 "mysql daemon" 7 "root@localhost" "fourth" ""
 # a dirty unit: the mysql account is gone from the text state file, the
 # account record in the binary state file is edited at a byte the control
 # pair never touches, a non-state file differs, a symlink points elsewhere,
 # a package version moves and a path exists that neither control has. Every
 # one of those is inside a path a hash-only comparison would have called
 # noise.
-make_rootfs "$fix/u2" 1790475777 "daemon"       6 "root@localhosX" "fourth" "tmp/new-file"
+make_rootfs "$fix/u2" 1790475777 "daemon"       6 "root@localhosX" "fifth"  "tmp/new-file"
+# a unit that changes one state file's mode and not a byte of its content
+make_rootfs "$fix/u3" 1790475089 "mysql daemon" 8 "root@localhost" "first"  ""
+chmod 600 "$fix/u3/var/lib/mysql/fixed.cnf"
 echo "component=2" > "$fix/u2/etc/keel/component.conf"
 rm "$fix/u2/usr/lib/python3/setuptools/lorem"
 ln -s "text/other file.txt" "$fix/u2/usr/lib/python3/setuptools/lorem"
@@ -291,7 +300,7 @@ s=$tmp/sample
 mkdir -p "$s"
 measure_tree_record "$fix/c1" > "$s/tree.tsv"
 measure_state_sample "$fix/c1" "$s/tree.tsv" "$s" 100000 "$globs"
-assert_eq sample-count "$(wc -l < "$s/state.tsv")" 3
+assert_eq sample-count "$(wc -l < "$s/state.tsv")" 4
 assert_eq sample-shadow "$(cat "$s/state/etc/shadow")" "$(cat "$fix/c1/etc/shadow")"
 assert_grep sample-flag "	sampled	" "$(cat "$s/state.tsv")"
 s2=$tmp/sample-cap
@@ -318,56 +327,12 @@ assert_eq value-absent "$(measure_value "$a" p9)" ""
 assert_eq count-lines "$(measure_count "$a")" 3
 assert_eq count-missing "$(measure_count "$tmp/absent")" 0
 
-info "9: measure_is_text"
-assert_ok text-yes measure_is_text "$fix/c1/etc/shadow"
-assert_fail text-no measure_is_text "$fix/c1/var/lib/mysql/mysql/global_priv.MAD"
-assert_fail text-missing measure_is_text "$tmp/absent"
-
-info "10: measure_signature and measure_set_minus"
-printf 'one\ntwo\nthree\n' > "$tmp/t1"
-printf 'one\nTWO\nthree\n' > "$tmp/t2"
-printf 'one\ntwo\nthree\nfour\n' > "$tmp/t3"
-assert_eq sig-text-same "$(measure_signature "$tmp/t1" "$tmp/t1")" ""
-assert_eq sig-text-changed "$(measure_signature "$tmp/t1" "$tmp/t2")" "$(printf 'n2\no2')"
-assert_eq sig-text-added "$(measure_signature "$tmp/t1" "$tmp/t3")" "n4"
-printf 'AAAA' > "$tmp/b1"
-printf 'AABA' > "$tmp/b2"
-printf 'AAAAA' > "$tmp/b3"
-printf '\x00\x00\x00\x00' > "$tmp/b0"
-assert_eq sig-bin-same "$(measure_signature "$tmp/b0" "$tmp/b0")" ""
-assert_eq sig-bin-offset "$(measure_signature "$tmp/b0" "$(printf %s "$tmp/b0"; :)")" ""
-cp "$tmp/b0" "$tmp/b0x"; printf '\x01' | dd of="$tmp/b0x" bs=1 seek=2 conv=notrunc status=none
-assert_eq sig-bin-at "$(measure_signature "$tmp/b0" "$tmp/b0x")" "@3"
-head -c 5 /dev/zero > "$tmp/b0y"
-assert_eq sig-bin-len "$(measure_signature "$tmp/b0" "$tmp/b0y")" "len"
-assert_fail sig-missing measure_signature "$tmp/b0" "$tmp/absent"
-assert_eq minus-empty "$(measure_set_minus "$(printf 'a\nb')" "$(printf 'a\nb\nc')")" ""
-assert_eq minus-residue "$(measure_set_minus "$(printf 'a\nb')" "$(printf 'a')")" "b"
-assert_eq minus-nothing "$(measure_set_minus "" "$(printf 'a')")" ""
-
-info "10b: measure_nature_list"
-assert_eq nature-empty "$(measure_nature_list "")" ""
-assert_eq nature-all "$(measure_nature_list "$(printf 'len\no3\nn4\n@7')")" \
-    "the length, other line 4, control line 3, byte 7"
-assert_eq nature-unknown "$(measure_nature_list "wat")" "wat"
-assert_grep nature-overflow "and 4 more" \
-    "$(measure_nature_list "$(seq 1 12 | sed 's/^/@/')")"
-
-info "10b2: measure_print_set caps a long list"
-saved=$MEASURE_PRINT_MAX
-MEASURE_PRINT_MAX=2
-assert_grep print-set-capped "and 2 more" "$(measure_print_set paths "$(printf 'a\nb\nc\nd')")"
-assert_eq print-set-empty "$(measure_print_set paths "")" ""
-MEASURE_PRINT_MAX=$saved
-
-info "10c: measure_lines never splits a path on a space"
-assert_eq lines-space "$(measure_lines "> " "./a b/c d")" "> ./a b/c d"
-assert_eq lines-empty "$(measure_lines "> " "")" ""
-
-info "11: captures"
+info "9: captures, with three controls so the floor is a union"
+export SOURCE_DATE_EPOCH=1700000000
 capture c1 c1 > "$tmp/cap-c1.log"
-capture u1 u1 > /dev/null
 capture c2 c2 > /dev/null
+capture c3 c3 > /dev/null
+capture u1 u1 > /dev/null
 capture u2 u2 > /dev/null
 assert_grep capture-summary "2 packages" "$(cat "$tmp/cap-c1.log")"
 assert_ok capture-check measure_capture_check "$caps/c1"
@@ -376,53 +341,40 @@ mkdir -p "$tmp/half"; : > "$tmp/half/tree.tsv"
 assert_fail capture-check-half measure_capture_check "$tmp/half"
 assert_eq meta-layer "$(measure_meta_get "$caps/c1" layer)" mariadb
 assert_eq meta-parent "$(measure_meta_get "$caps/c1" parent)" core
+assert_eq meta-epoch "$(measure_meta_get "$caps/c1" epoch)" 1700000000
 assert_eq meta-absent "$(measure_meta_get "$caps/c1" nothing)" ""
 assert_eq sample-path "$(measure_sample_path "$caps/c1" "./etc/shadow")" \
     "$caps/c1/state/etc/shadow"
+# the list travels with the capture, which is what makes finding 2 unrepeatable
+[[ -f "$caps/c1/state-paths.txt" ]] || fatal "the capture kept no copy of the state path list"
+assert_eq state-paths-copy "$(cat "$caps/c1/state-paths.txt")" "$(cat "$patterns")"
+assert_eq state-paths-digest "$(measure_meta_get "$caps/c1" state_paths_sha256)" \
+    "$(sha256sum < "$patterns" | cut -d' ' -f1)"
+assert_eq capture-mode "$(stat -c %a "$caps/c1")" 700
 
-info "12: measure_state_verdict, text"
-v=$(measure_state_verdict "$caps/c1" "$caps/u1" "$caps/c2" "./etc/shadow")
-assert_eq verdict-text-noise "$(cut -f1 <<<"$v")" noise
-assert_grep verdict-text-noise-why "control pair" "$v"
-v=$(measure_state_verdict "$caps/c1" "$caps/u2" "$caps/c2" "./etc/shadow")
-assert_eq verdict-text-real "$(cut -f1 <<<"$v")" real
-assert_grep verdict-text-real-why "line" "$v"
+info "10: measure_preconditions"
+measure_preconditions "$caps" u1 c1 c2 c3 || fatal "pre-ok: should have passed"
+assert_fail pre-missing measure_preconditions "$caps" u1 c1 absent
+assert_fail pre-duplicate measure_preconditions "$caps" u1 c1 c1
+assert_fail pre-same-as-unit measure_preconditions "$caps" c1 c1 c2
+SOURCE_DATE_EPOCH=1800000000 capture c1 other-epoch > /dev/null
+assert_fail pre-epoch measure_preconditions "$caps" u1 c1 other-epoch
+capture c1 noepoch-a > /dev/null
+capture c2 noepoch-b > /dev/null
+capture c3 noepoch-c > /dev/null
+for t in noepoch-a noepoch-b noepoch-c; do
+    sed -i 's/^epoch\t.*/epoch\tnone/' "$caps/$t/meta.tsv"
+done
+assert_fail pre-epoch-none measure_preconditions "$caps" noepoch-a noepoch-b noepoch-c
+"$M" capture --dir "$caps" --layer mariadb --parent core --tag other-parent >/dev/null 2>&1 || true
+echo c1 > "$layers/NEXT"
+"$M" capture --dir "$caps" --layer mariadb --tag no-parent > /dev/null
+assert_fail pre-parent measure_preconditions "$caps" u1 c1 no-parent
+capture c2 tampered > /dev/null
+echo "./extra/**" >> "$caps/tampered/state-paths.txt"
+assert_fail pre-list-differs measure_preconditions "$caps" u1 c1 tampered
 
-info "13: measure_state_verdict, binary"
-v=$(measure_state_verdict "$caps/c1" "$caps/u1" "$caps/c2" \
-    "./var/lib/mysql/mysql/global_priv.MAD")
-assert_eq verdict-bin-noise "$(cut -f1 <<<"$v")" noise
-v=$(measure_state_verdict "$caps/c1" "$caps/u2" "$caps/c2" \
-    "./var/lib/mysql/mysql/global_priv.MAD")
-assert_eq verdict-bin-real "$(cut -f1 <<<"$v")" real
-assert_grep verdict-bin-real-why "byte" "$v"
-
-info "14: measure_state_verdict, not sampled and absent"
-capture c1 s1 --state-max-bytes 8 > /dev/null
-capture u1 s2 --state-max-bytes 8 > /dev/null
-capture c2 s3 --state-max-bytes 8 > /dev/null
-v=$(measure_state_verdict "$caps/s1" "$caps/s2" "$caps/s3" "./var/lib/mysql/ibdata1")
-assert_eq verdict-unsampled "$(cut -f1 <<<"$v")" unsampled
-assert_grep verdict-unsampled-why "not sampled" "$v"
-v=$(measure_state_verdict "$caps/c1" "$caps/u2" "$caps/c2" "./var/lib/mysql/absent")
-assert_eq verdict-absent "$(cut -f1 <<<"$v")" unsampled
-
-info "15: measure_state_evidence"
-e=$(measure_state_evidence "$caps/c1" "$caps/u2" "$caps/c2" "./etc/shadow")
-assert_grep evidence-text-unit "control vs unit" "$e"
-assert_grep evidence-text-noise "control vs control" "$e"
-assert_grep evidence-text-row "mysql" "$e"
-e=$(measure_state_evidence "$caps/c1" "$caps/u2" "$caps/c2" \
-    "./var/lib/mysql/mysql/global_priv.MAD")
-assert_grep evidence-bin "offset" "$e"
-e=$(measure_state_evidence "$caps/s1" "$caps/s2" "$caps/s3" "./var/lib/mysql/ibdata1")
-assert_grep evidence-unsampled "not sampled" "$e"
-
-# ---------------------------------------------------------------------------
-# the executable
-# ---------------------------------------------------------------------------
-
-info "16: usage"
+info "11: usage"
 assert_status help 0 "$M" --help
 assert_status help-short 0 "$M" -h
 assert_status no-subcommand 2 "$M"
@@ -430,9 +382,11 @@ assert_status unknown-subcommand 2 "$M" frobnicate
 assert_status unknown-option 2 "$M" capture --nope
 assert_status value-missing 2 "$M" capture --dir
 assert_status two-subcommands 2 "$M" capture compare
+assert_status attr-no-again 2 "$M" attribute --dir "$caps" --control c1 --unit u1
 assert_grep help-text "attribute" "$("$M" --help)"
+assert_grep help-cleared "cleared" "$("$M" --help)"
 
-info "17: capture errors"
+info "12: capture errors"
 assert_status capture-nodir 2 "$M" capture --layer mariadb --tag t
 assert_status capture-nolayer 2 "$M" capture --dir "$caps" --tag t
 assert_status capture-notag 2 "$M" capture --dir "$caps" --layer mariadb
@@ -440,11 +394,9 @@ assert_status capture-unknown-opt 2 "$M" capture --dir "$caps" --layer m --tag t
 assert_status capture-badtag 2 "$M" capture --dir "$caps" --layer m --tag "../escape"
 assert_status capture-badcap 2 "$M" capture --dir "$caps" --layer m --tag t \
     --state-max-bytes plenty
-assert_status capture-nopatterns 3 env MEASURE_STATE_PATHS=$tmp/absent \
-    "$M" capture --dir "$caps" --layer m --tag t
-assert_status attribute-nopatterns 3 env MEASURE_STATE_PATHS=$tmp/absent \
-    "$M" attribute --dir "$caps" --control c1 --unit u1 --control-again c2
 assert_status capture-exists 2 "$M" capture --dir "$caps" --layer m --tag c1
+assert_status capture-nopatterns 3 env "MEASURE_STATE_PATHS=$tmp/absent" \
+    "$M" capture --dir "$caps" --layer m --tag t
 echo FAIL > "$layers/NEXT"
 assert_status capture-buildfail 3 "$M" capture --dir "$caps" --layer m --tag bad
 echo NOROOTFS > "$layers/NEXT"
@@ -454,54 +406,150 @@ r=$("$M" capture --dir "$caps" --layer m --tag nomanifest)
 assert_grep capture-nomanifest "no layer manifest" "$r"
 [[ ! -e "$caps/nomanifest/manifest.txt" ]] || fatal "capture-nomanifest: copied one anyway"
 [[ -f "$caps/c1/manifest.txt" ]] || fatal "capture: the layer manifest was not kept"
+assert_status capture-nobtbuilds 3 env -u MEASURE_LAYERS_DIR -u BT_BUILDS \
+    "$M" capture --dir "$caps" --layer m --tag nobtbuilds
 
-info "18: compare"
+info "13: compare"
 assert_status compare-missing 3 "$M" compare --dir "$caps" --a c1 --b absent
 assert_status compare-args 2 "$M" compare --dir "$caps" --a c1
 r=$("$M" compare --dir "$caps" --a c1 --b c1) || fatal "compare-same: exit $?"
 assert_grep compare-identical "identical" "$r"
-r=$("$M" compare --dir "$caps" --a c1 --b u2 || true)
 assert_status compare-differs 1 "$M" compare --dir "$caps" --a c1 --b u2
+r=$("$M" compare --dir "$caps" --a c1 --b u2 || true)
 assert_grep compare-file "./etc/keel/component.conf" "$r"
 assert_grep compare-pkg "coreutils" "$r"
 assert_grep compare-link "lorem" "$r"
 assert_grep compare-added "./tmp/new-file" "$r"
 
-info "19: attribute, a clean unit"
-assert_status attr-args 2 "$M" attribute --dir "$caps" --control c1 --unit u1
+# ---------------------------------------------------------------------------
+# attribute
+# ---------------------------------------------------------------------------
+
+attr() { "$M" attribute --dir "$caps" --unit "$1" --control c1 \
+    --control-again c2 --control-again c3 "${@:2}"; }
+suspects() { printf '%s\n' "$BT/share/layer-state-suspect"; }
+
+info "14: a clean unit still fails while two binaries are unexplained"
 assert_status attr-missing 3 "$M" attribute --dir "$caps" --control c1 --unit u1 \
     --control-again absent
-r=$("$M" attribute --dir "$caps" --control c1 --unit u1 --control-again c2)
-assert_grep attr-pass "verdict: PASS" "$r"
-assert_grep attr-zero "attributable differences" "$r"
+assert_status attr-clean-uncleared 1 attr u1
+r=$(attr u1 || true)
+assert_grep attr-pairs "control pairs 3" "$r"
+assert_grep attr-perpair "attributable file differences if a single control pair" "$r"
 assert_eq attr-zero-count \
-    "$(awk -F: '/attributable differences/ { gsub(/ /, "", $2); print $2 }' <<<"$r")" 0
+    "$(awk -F: '/^attributable differences/ { gsub(/ /, "", $2); print $2 }' <<<"$r")" 0
 assert_grep attr-command "bt-layer-measure attribute" "$r"
-assert_grep attr-floor "noise floor" "$r"
-# the state paths inside the floor are named and classified, not subtracted
-assert_grep attr-state-named "./etc/shadow" "$r"
-assert_grep attr-state-noise "noise" "$r"
-
-info "20: attribute, a dirty unit"
-assert_status attr-dirty 1 "$M" attribute --dir "$caps" --control c1 --unit u2 \
-    --control-again c2
-r=$("$M" attribute --dir "$caps" --control c1 --unit u2 --control-again c2 || true)
+assert_grep attr-command-again "control-again c3" "$r"
+# the text state file is explained by the mask, the binaries are not
+assert_grep attr-shadow-noise "noise .*/etc/shadow" "$r"
+assert_grep attr-binary-overlapping "overlapping .*global_priv" "$r"
 assert_grep attr-fail "verdict: FAIL" "$r"
+# and the evidence is printed even for the path called noise, which is the
+# whole reason the first implementation could not be trusted
+assert_grep attr-evidence-for-noise "control vs unit" "$r"
+assert_grep attr-subtracted-named "./var/log/alternatives.log" "$r"
+
+info "15: a waiver in writing clears an overlapping path and is printed"
+cat > "$tmp/cleared" <<'EOF'
+# checked by hand: both are install-time database state
+./var/lib/mysql/mysql/global_priv.MAD	creation stamps, read byte by byte on 2026-09-28
+./var/lib/mysql/ibdata1	InnoDB page header, read byte by byte on 2026-09-28
+EOF
+r=$(attr u1 --cleared "$tmp/cleared")
+assert_grep attr-pass "verdict: PASS" "$r"
+assert_grep attr-waiver-printed "waived in writing" "$r"
+assert_grep attr-waiver-reason "read byte by byte" "$r"
+assert_status attr-pass-status 0 attr u1 --cleared "$tmp/cleared"
+
+info "16: a dirty unit, and a real difference inside the floor"
+assert_status attr-dirty 1 attr u2 --cleared "$tmp/cleared"
+r=$(attr u2 --cleared "$tmp/cleared" || true)
+assert_grep attr-dirty-fail "verdict: FAIL" "$r"
 assert_grep attr-attributable "./etc/keel/component.conf" "$r"
 assert_grep attr-added "./tmp/new-file" "$r"
 assert_grep attr-pkgdiff "coreutils" "$r"
 assert_grep attr-linkdiff "lorem" "$r"
-# the point of the whole exercise: a real difference inside the noise floor
-assert_grep attr-real-state "real" "$r"
-assert_grep attr-real-shadow "./etc/shadow" "$r"
+# the account row is gone from a text state file whose line 1 moves in every
+# build: a positional comparison called this noise
+assert_grep attr-real-shadow "real .*/etc/shadow" "$r"
 assert_grep attr-real-row "mysql" "$r"
+# a waiver cannot wave away a real difference, only an overlapping one
+assert_grep attr-real-binary "real .*global_priv" "$r"
 
-info "21: attribute, blind because nothing was sampled"
-assert_status attr-unsampled 1 "$M" attribute --dir "$caps" --control s1 --unit s2 \
-    --control-again s3
-r=$("$M" attribute --dir "$caps" --control s1 --unit s2 --control-again s3 || true)
+info "17: blind because nothing was sampled"
+capture c1 s1 --state-max-bytes 8 > /dev/null
+capture c2 s2 --state-max-bytes 8 > /dev/null
+capture c3 s3 --state-max-bytes 8 > /dev/null
+capture u1 su --state-max-bytes 8 > /dev/null
+r=$("$M" attribute --dir "$caps" --unit su --control s1 --control-again s2 \
+    --control-again s3 || true)
 assert_grep attr-unsampled-why "not sampled" "$r"
 assert_grep attr-unsampled-fail "verdict: FAIL" "$r"
+assert_status attr-unsampled-status 1 "$M" attribute --dir "$caps" --unit su \
+    --control s1 --control-again s2 --control-again s3
+
+info "18: the blindness cannot be switched off at attribute time"
+# a one line list that matches nothing would have turned the run above into a
+# PASS with a provenanced looking digest; attribute reads the captures' own
+# copies and never the environment
+echo './nothing/**' > "$tmp/narrow"
+r=$(MEASURE_STATE_PATHS="$tmp/narrow" "$M" attribute --dir "$caps" --unit su \
+    --control s1 --control-again s2 --control-again s3 || true)
+assert_grep attr-nosubst-fail "verdict: FAIL" "$r"
+assert_grep attr-nosubst-still "not sampled" "$r"
+assert_status attr-nosubst-status 1 env "MEASURE_STATE_PATHS=$tmp/narrow" \
+    "$M" attribute --dir "$caps" --unit su --control s1 --control-again s2 \
+    --control-again s3
+
+info "19: a subtracted path whose name looks like state fails the run"
+echo '*alternatives*' > "$tmp/suspect"
+r=$(MEASURE_SUSPECT_PATHS="$tmp/suspect" attr u1 --cleared "$tmp/cleared" || true)
+assert_grep suspect-named "./var/log/alternatives.log" "$r"
+assert_grep suspect-told "add them to" "$r"
+assert_grep suspect-fail "verdict: FAIL" "$r"
+assert_status suspect-status 1 env "MEASURE_SUSPECT_PATHS=$tmp/suspect" \
+    "$M" attribute --dir "$caps" --unit u1 --control c1 --control-again c2 \
+    --control-again c3 --cleared "$tmp/cleared"
+
+info "20: a state path whose bytes are identical and whose mode moved"
+capture u3 u3 > /dev/null
+r=$("$M" attribute --dir "$caps" --unit u3 --control c1 --control-again c2 \
+    --control-again c3 --cleared "$tmp/cleared" || true)
+assert_grep mode-only "unchanged 1" "$r"
+assert_grep mode-only-path "fixed.cnf" "$r"
+
+info "21: the evidence is abbreviated past the cap, never dropped"
+saved_ev=$MEASURE_EVIDENCE_PATHS
+MEASURE_EVIDENCE_PATHS=1
+r=$(measure_attribute_report "$caps" u1 /nonexistent "$(suspects)" c1 c2 c3 || true)
+assert_grep evidence-abbrev "more abbreviated to their summary line" "$r"
+MEASURE_EVIDENCE_PATHS=$saved_ev
+
+info "22: the guards that must never fire"
+globs=$(measure_state_patterns "$patterns")
+measure_verdict() { printf '\t\n'; }
+r=$(measure_state_section "$caps" u1 /nonexistent "$(suspects)" "$globs" c1 c2 c3 2>&1 || true)
+assert_grep guard-noverdict "no verdict for" "$r"
+measure_verdict() { printf 'invented\tnot one of the five\n'; }
+r=$(measure_state_section "$caps" u1 /nonexistent "$(suspects)" "$globs" c1 c2 c3 2>&1 || true)
+assert_grep guard-totals "do not add up" "$r"
+unset -f measure_verdict
+source "$BT/bin/layer-compare-lib"
+
+info "23: measure_nature_list"
+assert_eq nature-empty "$(measure_nature_list "")" ""
+assert_eq nature-all "$(measure_nature_list "$(printf 'len\no3\nn4\n@7')")" \
+    "the length, other line 4, control line 3, byte 7"
+assert_eq nature-unknown "$(measure_nature_list "wat")" "wat"
+assert_grep nature-overflow "and 4 more" \
+    "$(measure_nature_list "$(seq 1 12 | sed 's/^/@/')")"
+
+info "24: measure_print_set caps a long list"
+saved=$MEASURE_PRINT_MAX
+MEASURE_PRINT_MAX=2
+assert_grep print-set-capped "and 2 more" "$(measure_print_set paths "$(printf 'a\nb\nc\nd')")"
+assert_eq print-set-empty "$(measure_print_set paths "")" ""
+MEASURE_PRINT_MAX=$saved
 
 echo
 info "all tests passed"

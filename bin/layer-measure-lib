@@ -37,9 +37,6 @@ MEASURE_TSV_FIELDS_LINKS=2
 # How many items a one-line summary names before it says "and N more".
 MEASURE_LIST_MAX=8
 
-# How many lines of a diff the evidence block prints per pair.
-MEASURE_EVIDENCE_LINES=20
-
 # Default ceiling on a single state file's sampled copy. Above it the bytes
 # are not kept, the comparison has nothing to compare and says so; it never
 # silently treats an unread file as unchanged. 16 MiB covers a MariaDB
@@ -47,7 +44,7 @@ MEASURE_EVIDENCE_LINES=20
 MEASURE_STATE_MAX_BYTES_DEFAULT=16777216
 
 # Files every capture directory carries.
-MEASURE_CAPTURE_FILES="meta.tsv pkgs.tsv tree.tsv links.tsv state.tsv"
+MEASURE_CAPTURE_FILES="meta.tsv pkgs.tsv tree.tsv links.tsv state.tsv state-paths.txt"
 
 measure_error() { echo "ERROR [layer-measure]: $*" 1>&2; }
 
@@ -156,6 +153,8 @@ measure_pkgs_record() {
         measure_error "no dpkg database under $root"
         return 1
     fi
+    # the braces are dpkg-query's own field syntax, not shell expansion
+    # shellcheck disable=SC2016
     "$dpkg_query" --admindir="$root/var/lib/dpkg" -W \
         -f '${Package}\t${Version}\t${Status}\n' 2>/dev/null \
         | awk -F'\t' -v OFS='\t' '{ split($3, s, " "); if (s[3] == "installed") print $1, $2 }' \
@@ -280,54 +279,8 @@ measure_changed() {
 }
 
 # ---------------------------------------------------------------------------
-# the nature of one difference
+# set helpers over the difference tokens
 # ---------------------------------------------------------------------------
-
-# measure_is_text FILE
-measure_is_text() {
-    local f=$1
-    if [[ ! -f "$f" ]]; then
-        measure_error "no such file: $f"
-        return 1
-    fi
-    local all stripped
-    all=$(wc -c < "$f")
-    stripped=$(tr -d '\0' < "$f" | wc -c)
-    [[ "$all" == "$stripped" ]]
-}
-
-# measure_signature A B -> the tokens by which A and B differ, C sorted:
-#   o<n>  line n of A is not in B where it was      (text)
-#   n<n>  line n of B is not in A where it was      (text)
-#   @<n>  byte n differs                            (binary)
-#   len   the two files are not the same length     (binary)
-#
-# The tokens, and not the bytes themselves, are what the noise floor is
-# subtracted on: a clock that moves in both pairs touches the same line or
-# the same offset in both, so its tokens cancel, while a deleted account
-# leaves a token the control pair never produces.
-measure_signature() {
-    local a=$1 b=$2
-    if [[ ! -f "$a" ]] || [[ ! -f "$b" ]]; then
-        measure_error "cannot compare $a with $b: one of them is not a file"
-        return 1
-    fi
-    if measure_is_text "$a" && measure_is_text "$b"; then
-        diff --old-line-format=$'o%dn\n' --new-line-format=$'n%dn\n' --unchanged-line-format='' -- "$a" "$b" | LC_ALL=C sort -u
-        return 0
-    fi
-    local sa sb tokens
-    sa=$(wc -c < "$a")
-    sb=$(wc -c < "$b")
-    # cmp exits 1 when the files differ, which is the normal case here, so
-    # its status is collected rather than inherited: under pipefail an
-    # inherited 1 made this function report a failure instead of a signature.
-    tokens=$(cmp -l -- "$a" "$b" 2>/dev/null | awk '{ print "@" $1 }' || true)
-    [[ "$sa" == "$sb" ]] || tokens="len"$'\n'"$tokens"
-    [[ -n "$tokens" ]] || return 0
-    LC_ALL=C sort -u <<<"$tokens" | grep .
-    return 0
-}
 
 # measure_set_minus A B -> the lines of A that are not lines of B
 measure_set_minus() {
@@ -360,80 +313,6 @@ measure_nature_list() {
     printf '%s\n' "${out[*]}" | sed 's/,/, /g'
 }
 
-# measure_state_verdict CONTROL UNIT CONTROL_AGAIN PATH -> verdict<TAB>why
-#
-#   noise      the unit build differs from the control only where the
-#              control differs from itself
-#   real       it differs somewhere the control pair does not, so the change
-#              being measured is what differs, whatever the path is called
-#   unsampled  no bytes were kept on some side, so neither can be said
-measure_state_verdict() {
-    local c=$1 u=$2 c2=$3 path=$4
-    local sc su sc2 side
-    sc=$(measure_sample_path "$c" "$path")
-    su=$(measure_sample_path "$u" "$path")
-    sc2=$(measure_sample_path "$c2" "$path")
-    for side in "$sc" "$su" "$sc2"; do
-        if [[ ! -f "$side" ]]; then
-            printf 'unsampled\t%s\n' \
-                "not sampled in every build (no bytes kept at $side), so nothing can be said about it"
-            return 0
-        fi
-    done
-    local ra rn residue
-    ra=$(measure_signature "$sc" "$su") || return 1
-    rn=$(measure_signature "$sc" "$sc2") || return 1
-    residue=$(measure_set_minus "$ra" "$rn")
-    if [[ -z "$residue" ]]; then
-        printf 'noise\t%s\n' \
-            "every difference here is one the control pair shows against itself ($(grep -c . <<<"$ra" || true) in total)"
-        return 0
-    fi
-    printf 'real\t%s\n' \
-        "differences the control pair does not show against itself ($(grep -c . <<<"$residue" || true) of them): $(measure_nature_list "$residue")"
-}
-
-# measure_state_evidence CONTROL UNIT CONTROL_AGAIN PATH
-# What actually differs, both ways round, so the verdict above can be
-# checked rather than believed.
-measure_state_evidence() {
-    local c=$1 u=$2 c2=$3 path=$4
-    local sc su sc2
-    sc=$(measure_sample_path "$c" "$path")
-    su=$(measure_sample_path "$u" "$path")
-    sc2=$(measure_sample_path "$c2" "$path")
-    echo "  $path"
-    local side
-    for side in "$sc" "$su" "$sc2"; do
-        if [[ ! -f "$side" ]]; then
-            echo "    not sampled: $side is absent, raise --state-max-bytes and capture again"
-            return 0
-        fi
-    done
-    echo "    control vs unit:"
-    measure_pair_evidence "$sc" "$su"
-    echo "    control vs control again (the noise floor at this path):"
-    measure_pair_evidence "$sc" "$sc2"
-    return 0
-}
-
-# measure_pair_evidence A B
-measure_pair_evidence() {
-    local a=$1 b=$2
-    if measure_is_text "$a" && measure_is_text "$b"; then
-        diff -u --label control --label other -- "$a" "$b" \
-            | tail -n +3 | head -n "$MEASURE_EVIDENCE_LINES" | sed 's/^/      /'
-        return 0
-    fi
-    local all offsets n
-    all=$(cmp -l -- "$a" "$b" 2>/dev/null | awk '{ print $1 }' || true)
-    n=$(grep -c . <<<"$all" || true)
-    offsets=$(head -n "$MEASURE_LIST_MAX" <<<"$all" | paste -sd, - || true)
-    printf '      sizes %s and %s; differing bytes: %s; first offsets: %s\n' \
-        "$(wc -c < "$a")" "$(wc -c < "$b")" "$n" "${offsets:-none}"
-    return 0
-}
-
 # ---------------------------------------------------------------------------
 # arguments
 # ---------------------------------------------------------------------------
@@ -455,7 +334,8 @@ measure_parse_args() {
     MEASURE_B=
     MEASURE_CONTROL=
     MEASURE_UNIT=
-    MEASURE_CONTROL2=
+    MEASURE_CONTROL2=()
+    MEASURE_CLEARED=
     MEASURE_HELP=
     MEASURE_CAP=$MEASURE_STATE_MAX_BYTES_DEFAULT
     local opt val
@@ -467,7 +347,7 @@ measure_parse_args() {
                 shift
                 continue
                 ;;
-            --dir|--layer|--parent|--tag|--a|--b|--control|--unit|--control-again|--state-max-bytes)
+            --dir|--layer|--parent|--tag|--a|--b|--control|--unit|--control-again|--state-max-bytes|--cleared)
                 if [[ $# -lt 2 ]]; then
                     measure_error "$opt needs a value"
                     return 1
@@ -498,7 +378,8 @@ measure_parse_args() {
             --b) MEASURE_B=$val ;;
             --control) MEASURE_CONTROL=$val ;;
             --unit) MEASURE_UNIT=$val ;;
-            --control-again) MEASURE_CONTROL2=$val ;;
+            --control-again) MEASURE_CONTROL2+=("$val") ;;
+            --cleared) MEASURE_CLEARED=$val ;;
             --state-max-bytes) MEASURE_CAP=$val ;;
         esac
     done
@@ -539,7 +420,10 @@ measure_check_args() {
             measure_require dir "$MEASURE_DIR" || return 1
             measure_require control "$MEASURE_CONTROL" || return 1
             measure_require unit "$MEASURE_UNIT" || return 1
-            measure_require control-again "$MEASURE_CONTROL2" || return 1
+            if [[ ${#MEASURE_CONTROL2[@]} -eq 0 ]]; then
+                measure_error "attribute needs --control-again at least once; it is repeatable, and every extra control build narrows what counts as noise"
+                return 1
+            fi
             ;;
         *)
             measure_error "unknown subcommand '$MEASURE_SUB' (one of: $MEASURE_SUBCOMMANDS)"
@@ -547,195 +431,4 @@ measure_check_args() {
             ;;
     esac
     return 0
-}
-
-# ---------------------------------------------------------------------------
-# reporting
-# ---------------------------------------------------------------------------
-
-# How many paths a report names before it says how many it left out.
-MEASURE_PRINT_MAX=40
-
-# measure_print_set LABEL SET
-measure_print_set() {
-    local label=$1 set=$2 n
-    n=$(grep -c . <<<"$set" || true)
-    [[ "$n" -gt 0 ]] || return 0
-    printf '  %s (%s):\n' "$label" "$n"
-    measure_lines "    " "$(head -n "$MEASURE_PRINT_MAX" <<<"$set")"
-    if [[ "$n" -gt "$MEASURE_PRINT_MAX" ]]; then
-        printf '    and %s more\n' "$((n - MEASURE_PRINT_MAX))"
-    fi
-    return 0
-}
-
-# measure_describe DIR TAG -> the one line a report prints per capture
-measure_describe() {
-    printf '%s  %s on %s, epoch %s, captured %s, %s packages, %s files, %s symlinks\n' \
-        "$2" \
-        "$(measure_meta_get "$1/$2" layer)" \
-        "$(measure_meta_get "$1/$2" parent)" \
-        "$(measure_meta_get "$1/$2" epoch)" \
-        "$(measure_meta_get "$1/$2" captured)" \
-        "$(measure_count "$1/$2/pkgs.tsv")" \
-        "$(measure_count "$1/$2/tree.tsv")" \
-        "$(measure_count "$1/$2/links.tsv")"
-}
-
-# measure_compare_one A B KIND -> the report for one kind, 1 if it differs
-measure_compare_one() {
-    local a=$1 b=$2 kind=$3
-    local onlya onlyb changed na nb nc
-    onlya=$(measure_only_in "$a/$kind.tsv" "$b/$kind.tsv")
-    onlyb=$(measure_only_in "$b/$kind.tsv" "$a/$kind.tsv")
-    changed=$(measure_changed "$a/$kind.tsv" "$b/$kind.tsv")
-    na=$(grep -c . <<<"$onlya" || true)
-    nb=$(grep -c . <<<"$onlyb" || true)
-    nc=$(grep -c . <<<"$changed" || true)
-    printf '%s: %s differing, %s only in the first, %s only in the second\n' \
-        "$kind" "$nc" "$na" "$nb"
-    measure_print_set "differing" "$changed"
-    measure_print_set "only in the first" "$onlya"
-    measure_print_set "only in the second" "$onlyb"
-    [[ $((na + nb + nc)) -eq 0 ]]
-}
-
-# measure_compare_report DIR A B -> 0 when the two captures are identical
-measure_compare_report() {
-    local dir=$1 a=$2 b=$3 kind differs=0
-    echo "=== bt-layer-measure compare ==============================================="
-    printf 'command       bt-layer-measure compare --dir %s --a %s --b %s\n' "$dir" "$a" "$b"
-    printf 'first         %s\n' "$(measure_describe "$dir" "$a")"
-    printf 'second        %s\n' "$(measure_describe "$dir" "$b")"
-    for kind in pkgs links tree; do
-        measure_compare_one "$dir/$a" "$dir/$b" "$kind" || differs=1
-    done
-    if [[ $differs -eq 0 ]]; then
-        echo "the two captures are identical: same packages, same symlinks, same files"
-    fi
-    echo "============================================================================"
-    return $differs
-}
-
-# measure_attributable A B C2_BASE C2_OTHER KIND WHICH
-# The differences between A and B that the control pair does not produce.
-#   changed  keys both have whose record differs
-#   gone     keys A has and B does not
-#   added    keys B has and A does not
-measure_attributable() {
-    local a=$1 b=$2 c=$3 c2=$4 kind=$5 which=$6
-    local pair floor
-    case "$which" in
-        changed)
-            pair=$(measure_changed "$a/$kind.tsv" "$b/$kind.tsv")
-            floor=$(measure_changed "$c/$kind.tsv" "$c2/$kind.tsv")
-            ;;
-        gone)
-            pair=$(measure_only_in "$a/$kind.tsv" "$b/$kind.tsv")
-            floor=$(measure_only_in "$c/$kind.tsv" "$c2/$kind.tsv")
-            ;;
-        added)
-            pair=$(measure_only_in "$b/$kind.tsv" "$a/$kind.tsv")
-            floor=$(measure_only_in "$c2/$kind.tsv" "$c/$kind.tsv")
-            ;;
-    esac
-    measure_set_minus "$pair" "$floor"
-}
-
-# measure_state_paths C U GLOBS -> every state path the unit pair differs at
-measure_state_paths() {
-    local c=$1 u=$2 globs=$3 path all=() sorted=()
-    mapfile -t all < <(measure_changed "$c/tree.tsv" "$u/tree.tsv"; measure_only_in "$c/tree.tsv" "$u/tree.tsv"; measure_only_in "$u/tree.tsv" "$c/tree.tsv")
-    [[ ${#all[@]} -gt 0 ]] || return 0
-    mapfile -t sorted < <(printf '%s\n' "${all[@]}" | LC_ALL=C sort -u)
-    for path in "${sorted[@]}"; do
-        [[ -n "$path" ]] || continue
-        measure_state_match "$path" "$globs" && printf '%s\n' "$path"
-    done
-    return 0
-}
-
-# measure_attribute_report DIR CONTROL UNIT CONTROL_AGAIN GLOBS GLOBS_FILE
-# The three-build comparison handbook decision 0010 step 3 asks for. Returns
-# 0 only when nothing is attributable to the change and nothing inside the
-# noise floor was either real or left unread.
-measure_attribute_report() {
-    local dir=$1 ctl=$2 unit=$3 ctl2=$4 globs=$5 globs_file=$6
-    local C=$dir/$ctl U=$dir/$unit C2=$dir/$ctl2
-    local kind which set n attributable=0
-    echo "=== bt-layer-measure attribution ==========================================="
-    printf 'command       bt-layer-measure attribute --dir %s --control %s --unit %s --control-again %s\n' \
-        "$dir" "$ctl" "$unit" "$ctl2"
-    printf 'state paths   %s (sha256 %s)\n' "$globs_file" \
-        "$(sha256sum < "$globs_file" | cut -c1-16)"
-    printf 'control       %s\n' "$(measure_describe "$dir" "$ctl")"
-    printf 'unit          %s\n' "$(measure_describe "$dir" "$unit")"
-    printf 'control again %s\n' "$(measure_describe "$dir" "$ctl2")"
-    echo
-    echo "noise floor, the control against itself:"
-    for kind in pkgs links tree; do
-        printf '  %-6s %s differing, %s only in the first, %s only in the second\n' "$kind" \
-            "$(grep -c . <<<"$(measure_changed "$C/$kind.tsv" "$C2/$kind.tsv")" || true)" \
-            "$(grep -c . <<<"$(measure_only_in "$C/$kind.tsv" "$C2/$kind.tsv")" || true)" \
-            "$(grep -c . <<<"$(measure_only_in "$C2/$kind.tsv" "$C/$kind.tsv")" || true)"
-    done
-    echo "the control against the unit:"
-    for kind in pkgs links tree; do
-        printf '  %-6s %s differing, %s only in the first, %s only in the second\n' "$kind" \
-            "$(grep -c . <<<"$(measure_changed "$C/$kind.tsv" "$U/$kind.tsv")" || true)" \
-            "$(grep -c . <<<"$(measure_only_in "$C/$kind.tsv" "$U/$kind.tsv")" || true)" \
-            "$(grep -c . <<<"$(measure_only_in "$U/$kind.tsv" "$C/$kind.tsv")" || true)"
-    done
-    echo
-    local detail=""
-    for kind in pkgs links tree; do
-        for which in changed gone added; do
-            set=$(measure_attributable "$C" "$U" "$C" "$C2" "$kind" "$which")
-            n=$(grep -c . <<<"$set" || true)
-            attributable=$((attributable + n))
-            [[ "$n" -gt 0 ]] || continue
-            detail="$detail$(measure_print_set "$kind $which" "$set")"$'\n'
-        done
-    done
-    printf 'attributable differences: %s\n' "$attributable"
-    echo "  (the control-unit pair minus the control-control pair, over packages, symlinks and files)"
-    [[ -z "$detail" ]] || printf '%s' "$detail"
-    echo
-
-    local paths verdict why path noise=0 real=0 unsampled=0 evidence=""
-    paths=$(measure_state_paths "$C" "$U" "$globs")
-    printf 'state paths the unit pair differs at: %s\n' "$(grep -c . <<<"$paths" || true)"
-    echo "  (a path that can hold accounts, credentials, keys or database content is"
-    echo "   never subtracted because it fell inside the noise floor; its bytes are"
-    echo "   compared in both pairs and the difference is named)"
-    while IFS= read -r path; do
-        [[ -n "$path" ]] || continue
-        IFS=$'\t' read -r verdict why < <(measure_state_verdict "$C" "$U" "$C2" "$path")
-        case "$verdict" in
-            noise) noise=$((noise + 1)) ;;
-            real) real=$((real + 1)) ;;
-            unsampled) unsampled=$((unsampled + 1)) ;;
-        esac
-        printf '  %-10s %s\n' "$verdict" "$path"
-        printf '             %s\n' "$why"
-        if [[ "$verdict" != noise ]]; then
-            evidence="$evidence$(measure_state_evidence "$C" "$U" "$C2" "$path")"$'\n'
-        fi
-    done <<<"$paths"
-    printf '  totals: noise %s, real %s, not sampled %s\n' "$noise" "$real" "$unsampled"
-    if [[ -n "$evidence" ]]; then
-        echo
-        echo "evidence for every state path that is not plain noise:"
-        printf '%s' "$evidence"
-    fi
-    echo
-    if [[ $((attributable + real + unsampled)) -eq 0 ]]; then
-        echo "verdict: PASS"
-        echo "============================================================================"
-        return 0
-    fi
-    printf 'verdict: FAIL (%s attributable, %s real inside the noise floor, %s not sampled)\n' \
-        "$attributable" "$real" "$unsampled"
-    echo "============================================================================"
-    return 1
 }

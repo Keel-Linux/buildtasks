@@ -32,6 +32,22 @@
 ./home/**/.ssh/**
 ./etc/ssl/private/**
 
+# service configuration that carries a credential
+./etc/mysql/**
+./etc/postgresql/**
+./etc/redis/**
+./etc/mongodb.conf
+./root/.my.cnf
+./root/.pgpass
+./root/.netrc
+./home/**/.my.cnf
+./home/**/.pgpass
+
+# identity that must not be shared between images
+# (docs/traps.md, "Every appliance built from core has the same machine-id")
+./etc/machine-id
+./var/lib/dbus/machine-id
+
 # database state
 ./var/lib/mysql/**
 ./var/lib/postgresql/**
