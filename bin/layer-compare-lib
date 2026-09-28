@@ -49,6 +49,22 @@ MEASURE_OFFSET_MAX=20000
 # The field separator inside a mask, which cannot occur in a text line.
 MEASURE_MASK_SEP=$'\001'
 
+# The free region of a mask is the part between the common prefix and the
+# common suffix: the part the controls actually vary. Admitting a line means
+# admitting whatever it put there, so the controls have to pin it. They pin
+# it by agreeing on its length, which must be no more than this, and on its
+# characters, which must all be in the class below.
+#
+# Why this class and not a wider one. A per-build random text field carries
+# no more shape than a random byte field, and this file already refuses to
+# call a binary coincidence noise for exactly that reason. Install-time text
+# state varies by clocks, counters and log sequence numbers, which are
+# digits and the punctuation of a date. A key, a password hash, a hostname
+# or a SQL fragment is not, and each of those was admitted as noise while
+# this constrained only the two ends of the line.
+MEASURE_FREE_MAX=24
+MEASURE_FREE_CLASS='0-9.:[:space:]-'
+
 # How many bytes of a window the binary evidence prints from each capture at
 # the first differing offset. Eight covers a 32 or 64 bit counter, which is
 # what most of these differences turn out to be.
@@ -222,39 +238,198 @@ measure_mask_at() {
         "$(measure_common_suffix "${lines[@]}")"
 }
 
-# measure_mask_admits LINE PREFIX SUFFIX
-# A mask with neither a prefix nor a suffix admits nothing: it is what two
-# unrelated lines have in common, which is no evidence about a third.
+# measure_free_region STRING PREFIX SUFFIX -> the part between the two
+measure_free_region() {
+    local s=$1 n=$(( ${#1} - ${#2} - ${#3} ))
+    [[ $n -gt 0 ]] || return 0
+    printf '%s\n' "${s:${#2}:$n}"
+}
+
+# measure_mask_admits LINE PREFIX SUFFIX CONTROL_LINE...
+#
+# Admits LINE only when the controls pin what it may carry between the
+# prefix and the suffix. Four ways they fail to:
+#
+#   the mask has neither a prefix nor a suffix, so it is only what two
+#   unrelated lines happen to share and says nothing about a third;
+#   the controls all carry the same line, so they establish no varying shape;
+#   the free regions are not all one length, or LINE's is a different length;
+#   a free region is longer than MEASURE_FREE_MAX, or carries a character
+#   outside MEASURE_FREE_CLASS or outside what the controls themselves used.
+#
+# A LINE a control itself produced is pinned by observation and admitted
+# whatever its shape, because it is a value this recipe makes on its own.
 measure_mask_admits() {
     local line=$1 prefix=$2 suffix=$3
+    shift 3
+    local v first="" same=yes
+    for v in "$@"; do
+        [[ -n "$first" ]] || first=$v
+        [[ "$v" == "$first" ]] || same=no
+        [[ "$line" != "$v" ]] || return 0
+    done
+    [[ "$same" == no ]] || return 1
     [[ -n "$prefix" ]] || [[ -n "$suffix" ]] || return 1
+    [[ ${#line} -ge $(( ${#prefix} + ${#suffix} )) ]] || return 1
+    [[ "$line" == "$prefix"* ]] || return 1
+    [[ -z "$suffix" ]] || [[ "$line" == *"$suffix" ]] || return 1
+    local free seen="" len=-1
+    for v in "$@"; do
+        free=$(measure_free_region "$v" "$prefix" "$suffix")
+        [[ $len -lt 0 ]] || [[ ${#free} -eq $len ]] || return 1
+        len=${#free}
+        seen=$seen$free
+    done
+    [[ $len -gt 0 ]] || return 1
+    [[ $len -le $MEASURE_FREE_MAX ]] || return 1
+    measure_free_pinned "$seen" || return 1
+    free=$(measure_free_region "$line" "$prefix" "$suffix")
+    [[ ${#free} -eq $len ]] || return 1
+    # the same character class the controls used there, not the same
+    # characters: a counter reaches digits three builds did not happen to
+    # show, while a key reaches letters they never could
+    [[ -z "$(tr -d "$(measure_free_class "$seen")" <<<"$free")" ]] || return 1
+    return 0
+}
+
+# measure_free_class STRING -> a tr set covering the classes STRING uses
+measure_free_class() {
+    local out=""
+    [[ "$1" != *[0-9]* ]] || out=$out'0-9'
+    [[ "$1" != *.* ]] || out=$out'.'
+    [[ "$1" != *:* ]] || out=$out':'
+    [[ "$1" != *[[:space:]]* ]] || out=$out'[:space:]'
+    [[ "$1" != *-* ]] || out=$out'-'
+    printf '%s\n' "$out"
+}
+
+# measure_mask_framed LINE PREFIX SUFFIX
+# The line carries the framing the controls share, so the difference is
+# inside the region they vary; what it put there is the open question.
+measure_mask_framed() {
+    local line=$1 prefix=$2 suffix=$3
+    [[ -n "$prefix" ]] || [[ -n "$suffix" ]] || return 0
     [[ ${#line} -ge $(( ${#prefix} + ${#suffix} )) ]] || return 1
     [[ "$line" == "$prefix"* ]] || return 1
     [[ -z "$suffix" ]] || [[ "$line" == *"$suffix" ]] || return 1
     return 0
 }
 
-# measure_cleared_reason FILE PATH -> the reason a waiver gives, or nothing
+# measure_free_summary LINE PREFIX SUFFIX -> how the free region is described
+# in the one line verdict, without printing a secret into it
+measure_free_summary() {
+    local free
+    free=$(measure_free_region "$1" "$2" "$3")
+    if [[ -z "$free" ]]; then
+        echo "nothing"
+        return 0
+    fi
+    local kind="not a number or a timestamp"
+    ! measure_free_pinned "$free" || kind="a number or a timestamp"
+    printf '%s characters, %s\n' "${#free}" "$kind"
+}
+
+# measure_free_pinned STRING
+# Every character is a digit or the punctuation of a date or a duration.
+measure_free_pinned() {
+    [[ -n "$1" ]] || return 1
+    [[ -z "$(tr -d "$MEASURE_FREE_CLASS" <<<"$1")" ]] || return 1
+    return 0
+}
+
+# A waiver file is five tab separated fields per rule:
 #
-# A waiver line is PATH<TAB>REASON, and PATH may be a glob, because a real
-# MariaDB data directory is 173 files that one sentence explains. A glob
-# waiver is only honest because the report names every path it covered, so
-# it is a record of what was waived and not a way of not looking.
-measure_cleared_reason() {
-    local file=$1 path=$2 rule reason line
+#   rule<TAB>count<TAB>max-position<TAB>justified-against<TAB>reason
+#
+#   rule              an exact path, or a glob; a glob has to carry enough
+#                     literal path to be a decision about somewhere
+#   count             how many differing state paths it covered when it was
+#                     written. A run where it covers a different number
+#                     fails, so a new file appearing in a waived directory
+#                     cannot be swept in silently
+#   max-position      the highest differing byte offset or line number the
+#                     waiver was justified against. A covered path differing
+#                     beyond it is not waived, so the same path turning
+#                     overlapping somewhere else is not quietly included
+#   justified-against the capture directory and recipe commit it was read
+#                     against, so it cannot outlive its evidence
+#   reason            what was read, and what it was found to be
+#
+# It lives in the repository beside the component, and the report prints its
+# digest and every rule, because a waiver is the one place a person
+# overrides the instrument.
+MEASURE_WAIVER_FIELDS=5
+
+# The least literal path a glob rule has to carry. "*" matches ./etc/shadow.
+MEASURE_WAIVER_MIN_LITERAL=8
+
+# measure_waiver_rules FILE -> the rules, one per line, comments gone
+measure_waiver_rules() {
+    [[ -f "$1" ]] || return 0
+    sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
+}
+
+# measure_waiver_check FILE
+measure_waiver_check() {
+    local file=$1 line rule count max rest literal rc=0 n=0
     [[ -f "$file" ]] || return 0
-    local -a rules=()
-    mapfile -t rules < "$file"
-    for line in "${rules[@]}"; do
-        IFS=$'\t' read -r rule reason <<<"$line"
-        [[ -n "$rule" ]] || continue
-        [[ "$rule" != \#* ]] || continue
-        # shellcheck disable=SC2053
-        if [[ "$path" == "$rule" ]] || [[ "$path" == $rule ]]; then
-            printf '%s\n' "$reason"
-            return 0
+    local -a lines=()
+    mapfile -t lines < <(measure_waiver_rules "$file")
+    for line in "${lines[@]}"; do
+        n=$((n + 1))
+        IFS=$'\t' read -r rule count max rest <<<"$line"
+        if [[ "$(awk -F'\t' '{ print NF }' <<<"$line")" -lt "$MEASURE_WAIVER_FIELDS" ]]; then
+            measure_error "$file line $n: a waiver has $MEASURE_WAIVER_FIELDS tab separated fields, rule, count, max-position, justified-against and reason"
+            rc=1
+            continue
         fi
+        literal=${rule//[*?]/}
+        if [[ ${#literal} -lt $MEASURE_WAIVER_MIN_LITERAL ]]; then
+            measure_error "$file line $n: '$rule' is too broad to be a decision about anywhere; a rule needs at least $MEASURE_WAIVER_MIN_LITERAL characters of literal path"
+            rc=1
+        fi
+        if [[ ! "$count" =~ ^[0-9]+$ ]] || [[ ! "$max" =~ ^[0-9]+$ ]]; then
+            measure_error "$file line $n: count and max-position are numbers, not '$count' and '$max'"
+            rc=1
+        fi
+        [[ -n "$rest" ]] || { measure_error "$file line $n: no justification"; rc=1; }
     done
+    return $rc
+}
+
+# measure_cleared_rule FILE PATH MAXPOS -> the whole rule line that covers
+# PATH, or nothing. MAXPOS is the furthest this path actually differs at; a
+# rule justified against less than that does not cover it.
+measure_cleared_rule() {
+    local file=$1 path=$2 maxpos=$3 line rule count max
+    [[ -f "$file" ]] || return 0
+    local -a lines=()
+    mapfile -t lines < <(measure_waiver_rules "$file")
+    for line in "${lines[@]}"; do
+        IFS=$'\t' read -r rule count max _ <<<"$line"
+        [[ -n "$rule" ]] || continue
+        # shellcheck disable=SC2053
+        [[ "$path" == "$rule" ]] || [[ "$path" == $rule ]] || continue
+        [[ "$maxpos" -le "$max" ]] || continue
+        printf '%s\n' "$line"
+        return 0
+    done
+    return 0
+}
+
+# measure_cleared_reason RULE_LINE -> the reason field of a rule line
+measure_cleared_reason() {
+    cut -f5- <<<"$1"
+}
+
+# measure_max_position UNIT BASE -> how far into the file it differs
+measure_max_position() {
+    local unit=$1 base=$2
+    if measure_is_text "$base" && measure_is_text "$unit"; then
+        measure_text_positions "$base" "$unit" | sed 's/^[on]//' | LC_ALL=C sort -n | tail -1
+        return 0
+    fi
+    measure_byte_offsets "$base" "$unit" | LC_ALL=C sort -n | tail -1
     return 0
 }
 
@@ -323,7 +498,8 @@ measure_verdict() {
 measure_verdict_text() {
     local positions=$1 unit=$2
     shift 2
-    local token n mask prefix suffix line unexplained=0 masked=0
+    local token n mask prefix suffix line f unexplained=0 masked=0
+    local -a variants=()
     while IFS= read -r token; do
         [[ -n "$token" ]] || continue
         n=${token#[on]}
@@ -331,13 +507,17 @@ measure_verdict_text() {
         prefix=${mask%%"$MEASURE_MASK_SEP"*}
         suffix=${mask#*"$MEASURE_MASK_SEP"}
         line=$(measure_line "$n" "$unit")
-        if measure_mask_admits "$line" "$prefix" "$suffix"; then
+        variants=()
+        for f in "$@"; do
+            variants+=("$(measure_line "$n" "$f")")
+        done
+        if measure_mask_admits "$line" "$prefix" "$suffix" "${variants[@]}"; then
             masked=$((masked + 1))
             continue
         fi
-        if [[ -z "$prefix" ]] && [[ -z "$suffix" ]]; then
+        if measure_mask_framed "$line" "$prefix" "$suffix"; then
             printf 'overlapping\t%s\n' \
-                "line $n varies in the controls with nothing in common, so nothing about it can be shown; read the evidence"
+                "line $n has the framing the controls vary within, and nothing pins what it put between: $(measure_free_summary "$line" "$prefix" "$suffix"); read the evidence"
             return 0
         fi
         unexplained=$((unexplained + 1))

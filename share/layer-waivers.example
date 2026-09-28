@@ -1,0 +1,27 @@
+# A waiver file. It lives in the repository beside the component it is about,
+# and bt-layer-measure attribute prints its digest and every rule below, with
+# every path each rule covered and that path's bytes.
+#
+# A waiver clears `overlapping`, which is a difference that coincides with
+# what the control builds vary but cannot be shown to be that variation. It
+# can never clear `real`. It is the one place a person overrides the
+# instrument, so it has to say what was read and what it was found to be.
+#
+# Five tab separated fields:
+#
+#   rule               an exact path, or a glob carrying enough literal path
+#                      to be a decision about somewhere. "*" is refused
+#   count              how many differing state paths it covered when it was
+#                      written. A run where it covers a different number
+#                      fails, so a new file appearing in a waived directory
+#                      cannot be swept in silently
+#   max-position       the highest differing byte offset or line number it
+#                      was justified against. A covered path differing
+#                      beyond it is not waived, so the same path turning
+#                      overlapping somewhere else is not quietly included
+#   justified-against  the capture directory and the recipe commit it was
+#                      read against, so it cannot outlive its evidence
+#   reason             what was read, and what it was found to be
+#
+# rule	count	max-position	justified-against	reason
+./var/lib/mysql/**	33	16777216	/mnt/builds/measure/mariadb-gate, recipe 659eeb4	Aria and InnoDB header timestamps; the six accounts and their authentication_string values are identical in all four captures, only password_last_changed moves. Read 2026-09-28.

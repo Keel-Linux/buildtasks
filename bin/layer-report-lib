@@ -300,7 +300,7 @@ measure_state_section() {
     shift 5
     local -a c=("$@")
     local base=${c[0]}
-    local paths path verdict why reason tag
+    local paths path verdict why rule shown_verdict tag maxpos
     local -a samples=()
     local noise=0 real=0 overlapping=0 unsampled=0 none=0 waived=0 examined=0
     local evidence="" shown=0 abbreviated=0 waivers=""
@@ -325,22 +325,35 @@ measure_state_section() {
             measure_error "no verdict for $path, which must not happen"
             return 1
         fi
-        reason=$(measure_cleared_reason "$cleared" "$path")
-        if [[ -n "$reason" ]] && [[ "$verdict" == overlapping ]]; then
-            waived=$((waived + 1))
-            waivers="$waivers$(printf '%s\t%s' "$path" "$reason")"$'\n'
-            continue
+        rule=""
+        if [[ "$verdict" == overlapping ]]; then
+            maxpos=$(measure_max_position "$(measure_sample_path "$dir/$unit" "$path")" "${samples[0]}")
+            rule=$(measure_cleared_rule "$cleared" "$path" "$maxpos")
         fi
-        case "$verdict" in
-            noise) noise=$((noise + 1)) ;;
-            real) real=$((real + 1)) ;;
-            overlapping) overlapping=$((overlapping + 1)) ;;
-            unsampled) unsampled=$((unsampled + 1)) ;;
-            none) none=$((none + 1)) ;;
-        esac
-        printf '  %-11s %s\n' "$verdict" "$path"
+        shown_verdict=$verdict
+        if [[ -n "$rule" ]]; then
+            waived=$((waived + 1))
+            shown_verdict=cleared
+            waivers="$waivers$(printf '%s\t%s' "$path" "$(cut -f1 <<<"$rule")")"$'\n'
+        else
+            case "$verdict" in
+                noise) noise=$((noise + 1)) ;;
+                real) real=$((real + 1)) ;;
+                overlapping) overlapping=$((overlapping + 1)) ;;
+                unsampled) unsampled=$((unsampled + 1)) ;;
+                none) none=$((none + 1)) ;;
+            esac
+        fi
+        printf '  %-11s %s\n' "$shown_verdict" "$path"
         printf '              %s\n' "$why"
-        if [[ "$verdict" == real ]] || [[ $shown -lt $MEASURE_EVIDENCE_PATHS ]]; then
+        if [[ -n "$rule" ]]; then
+            printf '              cleared by rule %s, justified against %s: %s\n' \
+                "$(cut -f1 <<<"$rule")" "$(cut -f4 <<<"$rule")" \
+                "$(measure_cleared_reason "$rule")"
+        fi
+        # a waiver is the one place a person overrides the instrument, so it
+        # is the last place to withhold the bytes
+        if [[ "$verdict" == real ]] || [[ -n "$rule" ]] || [[ $shown -lt $MEASURE_EVIDENCE_PATHS ]]; then
             shown=$((shown + 1))
             evidence="$evidence$(measure_evidence "$path" "$(measure_sample_path "$dir/$unit" "$path")" "${samples[@]}")"$'\n'
         else
@@ -353,15 +366,8 @@ measure_state_section() {
     fi
     printf '  totals: noise %s, overlapping %s, real %s, not sampled %s, unchanged %s, cleared %s\n' \
         "$noise" "$overlapping" "$real" "$unsampled" "$none" "$waived"
-    if [[ -n "$waivers" ]]; then
-        echo
-        printf 'waived in writing (%s paths, every one of them named):\n' "$waived"
-        measure_lines "  " "$(head -n "$MEASURE_PRINT_MAX" <<<"$waivers" \
-            | sed "s/\t/  ->  /")"
-        [[ "$waived" -le "$MEASURE_PRINT_MAX" ]] \
-            || printf '  and %s more, all covered by the same waiver file\n' \
-                "$((waived - MEASURE_PRINT_MAX))"
-    fi
+    local stretched=0
+    measure_waiver_section "$cleared" "$waivers" "$waived" || stretched=1
     if [[ -n "$evidence" ]]; then
         echo
         echo "evidence, for every state path above:"
@@ -373,13 +379,13 @@ measure_state_section() {
     measure_subtracted_section "$dir" "$unit" "$suspects" "$globs" "${c[@]}"
     local suspect=$MEASURE_SUSPECT_COUNT
     echo
-    if [[ $((MEASURE_ATTRIBUTABLE + real + overlapping + unsampled + suspect)) -eq 0 ]]; then
+    if [[ $((MEASURE_ATTRIBUTABLE + real + overlapping + unsampled + suspect + stretched)) -eq 0 ]]; then
         echo "verdict: PASS"
         echo "============================================================================"
         return 0
     fi
-    printf 'verdict: FAIL (%s attributable, %s real, %s overlapping and uncleared, %s not sampled, %s subtracted but state shaped)\n' \
-        "$MEASURE_ATTRIBUTABLE" "$real" "$overlapping" "$unsampled" "$suspect"
+    printf 'verdict: FAIL (%s attributable, %s real, %s overlapping and uncleared, %s not sampled, %s subtracted but state shaped, %s waiver rules stretched)\n' \
+        "$MEASURE_ATTRIBUTABLE" "$real" "$overlapping" "$unsampled" "$suspect" "$stretched"
     echo "============================================================================"
     return 1
 }
@@ -410,4 +416,38 @@ measure_subtracted_section() {
     fi
     MEASURE_SUSPECT_COUNT=$(grep -c . <<<"$suspect" || true)
     return 0
+}
+
+# measure_waiver_section FILE WAIVED_PATHS COUNT
+# The waiver file itself, its digest and every rule, then which rule covered
+# which path. A rule that covered a different number of paths than it was
+# written against fails the run, so a new file appearing in a waived
+# directory cannot be swept in without anybody noticing.
+measure_waiver_section() {
+    local file=$1 waivers=$2 waived=$3 rule count covered rc=0
+    echo
+    if [[ ! -f "$file" ]]; then
+        echo "waivers: none"
+        return 0
+    fi
+    printf 'waivers       %s (sha256 %s)\n' "$file" \
+        "$(sha256sum < "$file" | cut -c1-16)"
+    local -a lines=()
+    mapfile -t lines < <(measure_waiver_rules "$file")
+    for rule in "${lines[@]}"; do
+        [[ -n "$rule" ]] || continue
+        count=$(cut -f2 <<<"$rule")
+        covered=$(LC_ALL=C awk -F'\t' -v r="$(cut -f1 <<<"$rule")" '$2 == r { n++ } END { print n + 0 }' <<<"$waivers")
+        printf '  rule %s: %s paths (written against %s, max position %s)\n' \
+            "$(cut -f1 <<<"$rule")" "$covered" "$count" "$(cut -f3 <<<"$rule")"
+        printf '       against %s: %s\n' "$(cut -f4 <<<"$rule")" \
+            "$(measure_cleared_reason "$rule")"
+        if [[ "$covered" != "$count" ]]; then
+            measure_error "the waiver for $(cut -f1 <<<"$rule") was written against $count paths and covers $covered here; read the difference and rewrite it"
+            echo "       THIS RULE HAS STRETCHED: written against $count, covers $covered"
+            rc=1
+        fi
+    done
+    printf '  cleared in this run: %s paths, every one of them named above\n' "$waived"
+    return $rc
 }

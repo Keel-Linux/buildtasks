@@ -164,10 +164,35 @@ they were noise:
 
 So the controls are the model, and the model has content in it. At each
 position the controls vary at, the longest common prefix and suffix of their
-variants is the *shape* of that variation, and the unit is admitted only if
-its line has that shape. `# written 1790475089` against `# written 1790475323`
-gives the shape `# written ...`, which `# written 1790475511` fits and
-`root:$y$hash:...` does not.
+variants is the framing of that variation, and the region between them is
+what they actually vary.
+
+Framing alone is not enough, and the first version of this made that mistake.
+It pinned the two ends of the line and left the middle free, so wherever the
+controls vary at random the mask degenerates to the line's fixed parts and
+any value carrying them was admitted: a hardcoded `ssh_host_ed25519_key.pub`
+behind `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI` and ` root@keel`, a baked-in
+password hash behind `root:$y$j9T$` and `:20000:0:99999:7:::`, and a SQL
+payload behind `timestamp=0001790574`.
+
+**So the controls have to pin the free region too.** They must agree on its
+length, it must be no longer than 24 characters, and every character of it
+must be in the class they used there, which may only be digits and the
+punctuation of a date. That is the rule this file already applies to bytes,
+which carry no shape and are therefore never `noise`; a per-build random text
+field carries no more shape than a random byte field. Install-time text state
+varies by clocks, counters and log sequence numbers. A key, a hash, a hostname
+or a SQL fragment is not one of those.
+
+A line a control itself produced is admitted whatever its shape, because it is
+a value this recipe makes on its own.
+
+One consequence worth having: the verdict no longer depends on when the gate
+ran. `mysql/user.frm`'s mask is 21 characters of prefix only because four
+builds landed inside the same thousand seconds, and across a digit carry it
+collapses to 9. The clock is `noise` at either length and the payload is not,
+because the criterion is the field's width and class rather than how much
+framing happened to survive.
 
 | Verdict | Meaning | Run |
 |---------|---------|-----|
@@ -194,15 +219,23 @@ not pass as if the file were unchanged. Raise `--state-max-bytes` (default
 
 ### Waivers
 
-`--cleared FILE` takes lines of `PATH<TAB>REASON`, and `PATH` may be a glob,
-because a real data directory is 173 files that one sentence explains:
+`--cleared FILE` takes five tab separated fields per rule, and the file lives
+in the repository beside the component. `share/layer-waivers.example` is the
+template.
 
-    ./var/lib/mysql/**	InnoDB and Aria creation stamps, read byte by byte on 2026-09-28
+| Field | What it is for |
+|---|---|
+| `rule` | an exact path, or a glob carrying enough literal path to be a decision about somewhere. `*` is refused: it matches `./etc/shadow` |
+| `count` | how many differing state paths it covered when written. A run where it covers a different number **fails**, so a new file appearing in a waived directory cannot be swept in silently |
+| `max-position` | the highest differing byte offset or line number it was justified against. A covered path differing beyond it is **not** waived |
+| `justified-against` | the capture directory and recipe commit it was read against, so it cannot outlive its evidence |
+| `reason` | what was read, and what it was found to be |
 
 A waiver clears `overlapping` and nothing else: it cannot clear a `real`
-difference. Every path a waiver covered is named in the block, so a reviewer
-sees what was waived and on what grounds, and the file itself is committed
-next to the component.
+difference. The block prints the file's digest, every rule, how many paths
+each one covered against how many it was written for, and **every cleared
+path with its bytes**. A waiver is the one place a person overrides the
+instrument, so it is the last place to withhold the evidence.
 
 ### What the floor removed
 

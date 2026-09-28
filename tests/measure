@@ -4,7 +4,8 @@
 # place, so every capture below is a real capture of a real tree.
 #
 # Code paths covered:
-#   layer-measure-lib: measure_path_safe (plain, space, tab, newline);
+#   layer-measure-lib: measure_path_safe (plain, space, tab, newline,
+#     backslash);
 #     measure_tree_record (sorted, tab keyed, size and mode, a path with a
 #     space, a rejected tab, a missing root); measure_links_record (target
 #     with a space, none); measure_pkgs_record (installed only, dpkg-query
@@ -15,13 +16,16 @@
 #     measure_capture_check (complete, incomplete, missing); measure_meta_get
 #     (present, absent); measure_only_in (some, none); measure_changed (some,
 #     none); measure_value (present, absent); measure_is_text (text, NUL,
-#     missing); measure_signature (text same, text changed line, text added
-#     line, binary same, binary offsets, binary length, missing side);
 #     measure_set_minus (empty, residue); measure_sample_path;
-#     measure_state_verdict (text noise, text real by content, text real by
-#     an extra changed line, binary noise, binary real offset, binary real
-#     length, not sampled on one side, absent on one side);
-#     measure_state_evidence (text, binary, unsampled); measure_count.
+#     measure_nature_list (empty, every token kind, unknown, overflow);
+#     measure_lines; measure_count. The verdicts themselves are
+#     tests/compare.
+#   layer-report-lib: measure_preconditions (ok, missing, duplicate, epoch
+#     mismatch, epoch none, parent mismatch, a tampered state list); the
+#     attribute and compare blocks; the waiver section (digest, rules,
+#     covered counts, a stretched rule, a rule too broad, malformed fields,
+#     a max-position that does not reach); the subtracted section and the
+#     suspect net.
 #   bt-layer-measure: --help; no subcommand; unknown subcommand; capture
 #     without --dir, without --layer, without --tag, with a bad tag, with a
 #     failing build, with no rootfs, ok, and refusing to overwrite a tag;
@@ -450,16 +454,44 @@ assert_grep attr-evidence-for-noise "control vs unit" "$r"
 assert_grep attr-subtracted-named "./var/log/alternatives.log" "$r"
 
 info "15: a waiver in writing clears an overlapping path and is printed"
+# rule, count, max-position, justified-against, reason
 cat > "$tmp/cleared" <<'EOF'
 # checked by hand: both are install-time database state
-./var/lib/mysql/mysql/global_priv.MAD	creation stamps, read byte by byte on 2026-09-28
-./var/lib/mysql/ibdata1	InnoDB page header, read byte by byte on 2026-09-28
+./var/lib/mysql/mysql/global_priv.MAD	1	64	fixtures, recipe deadbeef	creation stamps, read byte by byte on 2026-09-28
+./var/lib/mysql/ibdata1	1	600	fixtures, recipe deadbeef	InnoDB page header, read byte by byte on 2026-09-28
 EOF
 r=$(attr u1 --cleared "$tmp/cleared")
 assert_grep attr-pass "verdict: PASS" "$r"
-assert_grep attr-waiver-printed "waived in writing" "$r"
+assert_grep attr-waiver-digest "waivers .*sha256" "$r"
+assert_grep attr-waiver-rule "rule ./var/lib/mysql/ibdata1: 1 paths" "$r"
 assert_grep attr-waiver-reason "read byte by byte" "$r"
+assert_grep attr-waiver-verdict "cleared .*global_priv.MAD" "$r"
+assert_grep attr-waiver-against "justified against" "$r"
+# a waiver is the one place a person overrides the instrument, so the bytes
+# are printed for a cleared path too
+assert_grep attr-waiver-evidence "sizes .* differing bytes" \
+    "$(sed -n '/evidence, for every state path/,$p' <<<"$r" | grep -A3 'global_priv.MAD')"
 assert_status attr-pass-status 0 attr u1 --cleared "$tmp/cleared"
+
+info "15b: a waiver that is too broad, stretched, or malformed"
+printf '*\t1\t64\tnowhere\tanything at all\n' > "$tmp/broad"
+assert_status waiver-broad 3 attr u1 --cleared "$tmp/broad"
+printf './var/lib/mysql/**\tonly two fields\n' > "$tmp/short"
+assert_status waiver-fields 3 attr u1 --cleared "$tmp/short"
+printf './var/lib/mysql/**\tmany\t64\tnowhere\tnot a number\n' > "$tmp/nan"
+assert_status waiver-count-nan 3 attr u1 --cleared "$tmp/nan"
+# a glob written against one path that now covers two fails rather than
+# quietly taking the new one in
+printf './var/lib/mysql/**\t1\t99999\tfixtures\twritten when this matched one file\n' > "$tmp/stretch"
+r=$(attr u1 --cleared "$tmp/stretch" || true)
+assert_grep waiver-stretched "THIS RULE HAS STRETCHED" "$r"
+assert_grep waiver-stretched-fail "verdict: FAIL" "$r"
+assert_status waiver-stretched-status 1 attr u1 --cleared "$tmp/stretch"
+# and a rule justified against a smaller max position does not cover a path
+# that differs beyond it
+printf './var/lib/mysql/ibdata1\t1\t4\tfixtures\tjustified only at the head of the file\n' > "$tmp/narrowmax"
+r=$(attr u1 --cleared "$tmp/narrowmax" || true)
+assert_grep waiver-maxpos "overlapping .*ibdata1" "$r"
 
 info "16: a dirty unit, and a real difference inside the floor"
 assert_status attr-dirty 1 attr u2 --cleared "$tmp/cleared"
@@ -475,6 +507,44 @@ assert_grep attr-real-shadow "real .*/etc/shadow" "$r"
 assert_grep attr-real-row "mysql" "$r"
 # a waiver cannot wave away a real difference, only an overlapping one
 assert_grep attr-real-binary "real .*global_priv" "$r"
+
+info "16b: a waiver over the database cannot green a hardcoded host key"
+# the composition the review found: a waiver naming ./var/lib/mysql/** is
+# exactly the route under discussion for this component, and with it the
+# run must still fail on a unit that bakes in an SSH host key, because the
+# controls vary that file at random and random is not a shape
+randkey() {
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s root@keel\n' \
+        "$(head -c 24 /dev/urandom | base64 | tr -d '=\n/+' | head -c 22)"
+}
+for pair in "c1 kc1" "c2 kc2" "c3 kc3" "u1 ku1"; do
+    set -- $pair
+    rm -rf "$fix/$2"; cp -a "$fix/$1" "$fix/$2"
+    mkdir -p "$fix/$2/etc/ssh"
+    randkey > "$fix/$2/etc/ssh/ssh_host_ed25519_key.pub"
+done
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHARDCODEDKEYINTHEUNIT root@keel\n' \
+    > "$fix/ku1/etc/ssh/ssh_host_ed25519_key.pub"
+cat > "$tmp/state-plus" <<'EOF'
+./etc/shadow
+./var/lib/mysql/**
+./etc/ssh/ssh_host_*
+EOF
+for t in kc1 kc2 kc3 ku1; do
+    echo "$t" > "$layers/NEXT"
+    MEASURE_STATE_PATHS=$tmp/state-plus "$M" capture --dir "$caps" --layer mariadb \
+        --parent core --tag "$t" > /dev/null
+done
+cat > "$tmp/db-waiver" <<'EOF'
+./var/lib/mysql/**	2	99999	fixtures, recipe deadbeef	database creation stamps, read on 2026-09-28
+EOF
+r=$("$M" attribute --dir "$caps" --unit ku1 --control kc1 --control-again kc2 \
+    --control-again kc3 --cleared "$tmp/db-waiver" || true)
+assert_grep compose-key-named "ssh_host_ed25519_key.pub" "$r"
+assert_grep compose-key-fails "verdict: FAIL" "$r"
+grep -qE '^  noise .*ssh_host' <<<"$r" && fatal "compose: a hardcoded host key came back as noise"
+assert_status compose-status 1 "$M" attribute --dir "$caps" --unit ku1 \
+    --control kc1 --control-again kc2 --control-again kc3 --cleared "$tmp/db-waiver"
 
 info "17: blind because nothing was sampled"
 capture c1 s1 --state-max-bytes 8 > /dev/null

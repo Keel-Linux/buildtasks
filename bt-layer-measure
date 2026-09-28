@@ -86,12 +86,18 @@ Options::
     --unit TAG          the build with the component supplied as a unit
     --control-again TAG another control build. Repeatable, and the floor is
                         the union over every pair of controls
-    --cleared FILE      waivers: lines of PATH<TAB>REASON. A state path whose
-                        difference coincides with the floor but cannot be
-                        shown to be that variation is 'overlapping' and fails
-                        the run; a waiver clears it and prints the reason in
-                        the block, so the judgement is on the record. A
-                        waiver cannot clear a 'real' difference
+    --cleared FILE      waivers, five tab separated fields per rule:
+                        rule, count, max-position, justified-against, reason.
+                        A state path whose difference coincides with the
+                        floor but cannot be shown to be that variation is
+                        'overlapping' and fails the run; a waiver clears it,
+                        and the block prints the file's digest, every rule
+                        and every path each rule covered, with its bytes. A
+                        rule covering a different number of paths than it was
+                        written against fails the run rather than stretching,
+                        a rule is refused if it carries too little literal
+                        path to be a decision about anywhere, and a waiver
+                        can never clear a 'real' difference
 
 Environment::
 
@@ -232,6 +238,8 @@ do_attribute() {
     measure_preconditions "$MEASURE_DIR" "$MEASURE_UNIT" \
         "$MEASURE_CONTROL" "${MEASURE_CONTROL2[@]}" \
         || die "$EXIT_INPUT" "the captures cannot be compared"
+    measure_waiver_check "${MEASURE_CLEARED:-/nonexistent}" \
+        || die "$EXIT_INPUT" "the waiver file is not usable"
     measure_attribute_report "$MEASURE_DIR" "$MEASURE_UNIT" \
         "${MEASURE_CLEARED:-/nonexistent}" "$(suspect_paths_file)" \
         "$MEASURE_CONTROL" "${MEASURE_CONTROL2[@]}" || exit "$EXIT_DIFFERENCES"

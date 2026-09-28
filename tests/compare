@@ -88,6 +88,23 @@ assert_grep() {
     grep -q -- "$pattern" <<<"$haystack" || fatal "$label: no '$pattern' in: $haystack"
 }
 
+# not_noise LABEL UNIT CONTROL...
+# What the four attacks below are actually about: whichever of `real` and
+# `overlapping` a case lands on, both fail the run and both print evidence.
+# Asserting one of them exactly would be asserting an accident of how much
+# framing the planted line happened to keep.
+not_noise() {
+    local label=$1
+    shift
+    local got
+    got=$(measure_verdict "$@") || fatal "$label: measure_verdict failed"
+    case "$(cut -f1 <<<"$got")" in
+        real|overlapping) ;;
+        *) fatal "$label: got '$got', wanted real or overlapping" ;;
+    esac
+    printf '%s\n' "$got"
+}
+
 # verdict LABEL WANT UNIT CONTROL...
 verdict() {
     local label=$1 want=$2
@@ -186,11 +203,38 @@ printf 'ZZZaaa\n' > "$tmp/q1"; printf 'YYYaaa\n' > "$tmp/q2"
 assert_eq mask-suffixonly "$(measure_mask_at 1 "$tmp/q1" "$tmp/q2")" "$(printf '\001aaa')"
 printf 'abc\n' > "$tmp/r1"; printf 'xyz\n' > "$tmp/r2"
 assert_eq mask-neither "$(measure_mask_at 1 "$tmp/r1" "$tmp/r2")" "$(printf '\001')"
-assert_ok admits-yes measure_mask_admits "# written 4000" "# written " "000"
-assert_fail admits-prefix measure_mask_admits "root:x:0" "# written " ""
-assert_fail admits-suffix measure_mask_admits "# written 4242" "# written " "000"
-assert_fail admits-short measure_mask_admits "# wr" "# written " ""
-assert_fail admits-emptymask measure_mask_admits "anything at all" "" ""
+# the free region, the part between the prefix and the suffix, is the part
+# the controls actually vary; admitting a line means admitting what it put
+# there, so the controls have to pin it
+assert_eq free-middle "$(measure_free_region "# written 4000" "# written " "000")" "4"
+assert_eq free-empty "$(measure_free_region "abc" "abc" "")" ""
+assert_eq free-overlap "$(measure_free_region "ab" "abc" "abc")" ""
+assert_ok admits-yes measure_mask_admits "# written 4000" "# written " "000" \
+    "# written 1000" "# written 2000" "# written 3000"
+assert_fail admits-prefix measure_mask_admits "root:x:0" "# written " "" \
+    "# written 1000" "# written 2000"
+assert_fail admits-suffix measure_mask_admits "# written 4242" "# written " "000" \
+    "# written 1000" "# written 2000"
+assert_fail admits-short measure_mask_admits "# wr" "# written " "" \
+    "# written 1000" "# written 2000"
+assert_fail admits-emptymask measure_mask_admits "anything at all" "" "" \
+    "abc" "xyz"
+# a free region of a different length than every control's is not that field
+assert_fail admits-longer measure_mask_admits "# written 40000" "# written " "" \
+    "# written 1000" "# written 2000"
+# a free region carrying anything but a number or a timestamp is not pinned,
+# however well the line's framing matches
+assert_fail admits-class measure_mask_admits "# written abcd" "# written " "" \
+    "# written 1000" "# written 2000"
+# controls that agree at a line establish no varying shape at all
+assert_fail admits-noshape measure_mask_admits "# written 4000" "# written 1000" "" \
+    "# written 1000" "# written 1000"
+# a unit line one of the controls itself produced is pinned by observation
+assert_ok admits-observed measure_mask_admits "# written 2000" "# written " "000" \
+    "# written 1000" "# written 2000"
+# and a free region longer than the cap is never pinned
+long=$(head -c 40 /dev/zero | tr '\0' '7')
+assert_fail admits-toolong measure_mask_admits "t=$long" "t=" "" "t=1111111111" "t=2222222222"
 
 # ---------------------------------------------------------------------------
 # the verdicts, and the four false negatives that made this rewrite necessary
@@ -286,20 +330,96 @@ assert_ok truncated-yes measure_offsets_truncated "$tmp/big1" "$tmp/big2"
 MEASURE_OFFSET_MAX=$saved_off
 assert_fail truncated-no measure_offsets_truncated "$tmp/ba" "$tmp/bb"
 
-info "17: measure_cleared_reason"
+info "16c: the four ways a two-ended mask was made to admit a constant"
+# each of these was reported as noise by the mask that constrained only the
+# prefix and the suffix, with a real secret in the free region
+key3() { printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s root@keel\n' "$1" > "$2"; }
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k1"
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k2"
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k3"
+key3 "HARDCODEDKEYTHATTHEUNITSHIPSXX" "$tmp/kunit"
+not_noise attack-sshkey "$tmp/kunit" "$tmp/k1" "$tmp/k2" "$tmp/k3" >/dev/null
+# shellcheck disable=SC2016  # a literal crypt prefix, not an expansion
+hash3() { printf 'root:$y$j9T$%s:20000:0:99999:7:::\n' "$1" > "$2"; }
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h1"
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h2"
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h3"
+hash3 "BAKEDINPASSWORDHASHX" "$tmp/hunit"
+not_noise attack-shadow "$tmp/hunit" "$tmp/h1" "$tmp/h2" "$tmp/h3" >/dev/null
+for n in 1 2 3; do printf '# written 179047500%s by build\n' "$n" > "$tmp/w$n"; done
+printf '# written 1790475 GRANT ALL ON *.* TO evil by build\n' > "$tmp/wunit"
+not_noise attack-planted "$tmp/wunit" "$tmp/w1" "$tmp/w2" "$tmp/w3" >/dev/null
+for n in 1 2 3; do printf 'token=%s\n' "$n$n$n$n" > "$tmp/g$n"; done
+printf 'token=%s\n' "$(head -c 400 /dev/zero | tr '\0' 'A')" > "$tmp/gunit"
+not_noise attack-grown "$tmp/gunit" "$tmp/g1" "$tmp/g2" "$tmp/g3" >/dev/null
+# the payload planted on the real mysql/user.frm of the gate run
+for n in 1 2 3; do printf 'TYPE=VIEW\ntimestamp=000179057410690213%s\n' "$n" > "$tmp/v$n"; done
+printf 'TYPE=VIEW\ntimestamp=0001790574 OR 1=1; GRANT ALL ON *.* TO evil@localhost\n' > "$tmp/vunit"
+not_noise attack-userfrm "$tmp/vunit" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
+# and the clock those four were hiding behind is still noise
+printf 'TYPE=VIEW\ntimestamp=0001790574106902139\n' > "$tmp/vclock"
+verdict clock-still-noise noise "$tmp/vclock" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
+
+info "16d: the verdict does not depend on where the builds fell"
+# the review's point: the user.frm mask was 21 characters of prefix only
+# because four builds landed inside the same thousand seconds, and a
+# criterion whose answer depends on the hour the gate ran is not a
+# criterion. Across a digit carry the prefix collapses to 9 characters; the
+# clock must still be noise and the payload must still not be
+for v in 0001790574999999999 0001790575000000001 0001790575000000009; do
+    printf 'TYPE=VIEW\ntimestamp=%s\n' "$v" > "$tmp/carry-$v"
+done
+printf 'TYPE=VIEW\ntimestamp=0001790575000000123\n' > "$tmp/carry-clock"
+printf 'TYPE=VIEW\ntimestamp=0001790574 OR 1=1; GRANT ALL ON *.* TO evil\n' > "$tmp/carry-payload"
+assert_eq carry-prefix \
+    "$(measure_common_prefix 0001790574999999999 0001790575000000001 0001790575000000009)" \
+    "000179057"
+verdict carry-clock noise "$tmp/carry-clock" "$tmp/carry-0001790574999999999" \
+    "$tmp/carry-0001790575000000001" "$tmp/carry-0001790575000000009" >/dev/null
+not_noise carry-payload "$tmp/carry-payload" "$tmp/carry-0001790574999999999" \
+    "$tmp/carry-0001790575000000001" "$tmp/carry-0001790575000000009" >/dev/null
+
+info "17: the waiver file"
 cat > "$tmp/cleared" <<'EOF'
-# a waiver is committed, and the report prints it
-./var/lib/mysql/ibdata1	InnoDB creation stamps, checked by hand on 2026-09-28
+# rule, count, max-position, justified-against, reason
+./var/lib/mysql/ibdata1	1	600	captures at /m/gate, recipe 659eeb4	InnoDB creation stamps, checked by hand on 2026-09-28
+./var/lib/postgresql/**	6	4096	captures at /m/gate, recipe 659eeb4	initdb output, read on 2026-09-28
 EOF
-assert_eq cleared-hit "$(measure_cleared_reason "$tmp/cleared" ./var/lib/mysql/ibdata1)" \
+assert_ok waiver-ok measure_waiver_check "$tmp/cleared"
+assert_ok waiver-nofile measure_waiver_check "$tmp/absent"
+assert_eq waiver-rules "$(measure_waiver_rules "$tmp/cleared" | wc -l)" 2
+rule=$(measure_cleared_rule "$tmp/cleared" ./var/lib/mysql/ibdata1 600)
+assert_eq cleared-hit "$(measure_cleared_reason "$rule")" \
     "InnoDB creation stamps, checked by hand on 2026-09-28"
-assert_eq cleared-miss "$(measure_cleared_reason "$tmp/cleared" ./etc/shadow)" ""
-assert_eq cleared-nofile "$(measure_cleared_reason "$tmp/absent" ./etc/shadow)" ""
-# a glob waiver, because a real data directory is 173 files and one sentence
-printf './var/lib/postgresql/**\tinitdb output, read on 2026-09-28\n' >> "$tmp/cleared"
-assert_eq cleared-glob "$(measure_cleared_reason "$tmp/cleared" ./var/lib/postgresql/17/main/PG_VERSION)" \
-    "initdb output, read on 2026-09-28"
-assert_eq cleared-glob-miss "$(measure_cleared_reason "$tmp/cleared" ./var/lib/other/x)" ""
+# a rule justified only as far as offset 600 does not cover a difference at 601
+assert_eq cleared-beyond "$(measure_cleared_rule "$tmp/cleared" ./var/lib/mysql/ibdata1 601)" ""
+assert_eq cleared-miss "$(measure_cleared_rule "$tmp/cleared" ./etc/shadow 1)" ""
+assert_eq cleared-nofile "$(measure_cleared_rule "$tmp/absent" ./etc/shadow 1)" ""
+# a glob covers a subtree, because a data directory is many files and one
+# sentence, and the report names every path it covered
+assert_grep cleared-glob "initdb output" \
+    "$(measure_cleared_reason "$(measure_cleared_rule "$tmp/cleared" ./var/lib/postgresql/17/main/PG_VERSION 10)")"
+# a rule with too little literal path is a decision about nowhere
+printf '*\t1\t1\tnowhere\tanything\n' > "$tmp/broad"
+assert_fail waiver-broad measure_waiver_check "$tmp/broad"
+printf './etc/*\t1\t1\tnowhere\tstill too broad\n' > "$tmp/broad2"
+assert_fail waiver-broad2 measure_waiver_check "$tmp/broad2"
+printf './var/lib/mysql/**\ttwo fields\n' > "$tmp/short"
+assert_fail waiver-fields measure_waiver_check "$tmp/short"
+printf './var/lib/mysql/**\tmany\t1\tnowhere\tcount is not a number\n' > "$tmp/nan"
+assert_fail waiver-nan measure_waiver_check "$tmp/nan"
+printf './var/lib/mysql/**\t1\t1\t\t\n' > "$tmp/nojust"
+assert_fail waiver-nojust measure_waiver_check "$tmp/nojust"
+
+assert_eq free-summary-none "$(measure_free_summary "abc" "abc" "")" "nothing"
+assert_grep free-summary-num "a number or a timestamp" \
+    "$(measure_free_summary "t=4000" "t=" "")"
+assert_grep free-summary-not "not a number" \
+    "$(measure_free_summary "t=abcd" "t=" "")"
+
+info "17b: measure_max_position"
+assert_eq maxpos-text "$(measure_max_position "$tmp/c2" "$tmp/c1")" 1
+assert_eq maxpos-binary "$(measure_max_position "$tmp/bb" "$tmp/ba")" 3
 
 info "18: measure_evidence is printed for every verdict, noise included"
 e=$(measure_evidence ./etc/shadow "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
