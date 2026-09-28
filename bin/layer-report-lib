@@ -447,7 +447,10 @@ measure_waiver_section() {
             "$(measure_cleared_reason "$rule")"
         # it cannot outlive its evidence: the captures it was read against
         # have to be the captures being measured
-        if [[ "$(cut -f4 <<<"$rule")" != *"$dir"* ]]; then
+        # the first comma separated component, compared for equality: a
+        # substring test accepted a waiver justified against mariadb-gate2
+        # for a run on mariadb-gate
+        if [[ "$(cut -f4 <<<"$rule" | cut -d, -f1)" != "$dir" ]]; then
             measure_error "the waiver for $(cut -f1 <<<"$rule") was justified against '$(cut -f4 <<<"$rule")', which does not name $dir; a waiver is a reading of particular captures and does not carry to others"
             echo "       THIS RULE NAMES OTHER CAPTURES: $dir is not in its justification"
             rc=1

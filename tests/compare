@@ -416,12 +416,16 @@ not_noise carry-payload "$tmp/carry-payload" "$tmp/carry-0001790574999999999" \
     "$tmp/carry-0001790575000000001" "$tmp/carry-0001790575000000009" >/dev/null
 
 info "17: the waiver file"
+# the list a capture carries, which is what licenses a glob rule's directory
+statelist=$(printf '%s\n' './etc/shadow' './etc/ssh/ssh_host_*' \
+    './etc/ssl/private/**' './var/lib/mysql/**' './var/lib/postgresql/**' \
+    './home/**/.ssh/**')
 cat > "$tmp/cleared" <<'EOF'
 # rule, count, max-position, justified-against, reason
 ./var/lib/mysql/ibdata1	1	600	captures at /m/gate, recipe 659eeb4	InnoDB creation stamps, checked by hand on 2026-09-28
 ./var/lib/postgresql/**	6	4096	captures at /m/gate, recipe 659eeb4	initdb output, read on 2026-09-28
 EOF
-assert_ok waiver-ok measure_waiver_check "$tmp/cleared"
+assert_ok waiver-ok measure_waiver_check "$tmp/cleared" 0 "$statelist"
 assert_ok waiver-nofile measure_waiver_check "$tmp/absent"
 assert_eq waiver-rules "$(measure_waiver_rules "$tmp/cleared" | wc -l)" 2
 rule=$(measure_cleared_rule "$tmp/cleared" ./var/lib/mysql/ibdata1 600)
@@ -438,20 +442,34 @@ assert_grep cleared-glob "initdb output" \
 # a glob is an exact path or a named directory and its subtree, and nothing
 # else: counting literal characters said ./etc/ss* was specific enough to
 # waive an SSH host key and a TLS private key under one sentence
-for bad in '*' './etc/*' './etc/ss*' './var/lib/*' './var/lib/my*/**' './etc/**' './**' './var/lib/mysql/*.MAD'; do
-    printf '%s\t1\t1\tnowhere\ttoo broad or not a subtree\n' "$bad" > "$tmp/broad"
-    assert_fail "waiver-broad-$bad" measure_waiver_check "$tmp/broad"
+# a glob rule's directory has to be one the state path list itself declares,
+# or below one. Counting components said ./var/lib was specific enough, and
+# ./var/lib is the common parent of six subtrees the list declares separately,
+# so one sentence about MariaDB accounts could clear PostgreSQL state.
+assert_eq state-dirs "$(measure_state_dirs "$statelist" | paste -sd, -)" \
+    "./etc/ssh,./etc/ssl/private,./home/**/.ssh,./var/lib/mysql,./var/lib/postgresql"
+assert_ok below-same measure_dir_at_or_below ./var/lib/mysql ./var/lib/mysql
+assert_ok below-deeper measure_dir_at_or_below ./var/lib/mysql/mysql ./var/lib/mysql
+assert_fail below-above measure_dir_at_or_below ./var/lib ./var/lib/mysql
+assert_fail below-sibling measure_dir_at_or_below ./var/lib/mysqlx ./var/lib/mysql
+for bad in '*' './etc/*' './etc/ss*' './var/lib/*' './var/lib/my*/**' './etc/**' './**' \
+        './var/lib/mysql/*.MAD' './var/lib/**' './var/**' './etc/ssl/**' \
+        './var/cache/**' './usr/share/**' './etc/webmin/**'; do
+    printf '%s\t1\t1\tnowhere\ttoo broad or not declared state\n' "$bad" > "$tmp/broad"
+    assert_fail "waiver-broad-$bad" measure_waiver_check "$tmp/broad" 0 "$statelist"
 done
-for good in './var/lib/mysql/**' './var/lib/mysql/mysql/global_priv.MAD' './etc/ssh/**'; do
-    printf '%s\t1\t1\tnowhere\ta named subtree or an exact path\n' "$good" > "$tmp/ok"
-    assert_ok "waiver-ok-$good" measure_waiver_check "$tmp/ok"
+for good in './var/lib/mysql/**' './var/lib/mysql/mysql/**' './etc/ssh/**' \
+        './etc/ssl/private/**' './var/lib/mysql/mysql/global_priv.MAD' \
+        './some/path/nobody/declared'; do
+    printf '%s\t1\t1\tnowhere\ta declared subtree or an exact path\n' "$good" > "$tmp/ok"
+    assert_ok "waiver-ok-$good" measure_waiver_check "$tmp/ok" 0 "$statelist"
 done
 printf './var/lib/mysql/**\ttwo fields\n' > "$tmp/short"
-assert_fail waiver-fields measure_waiver_check "$tmp/short"
+assert_fail waiver-fields measure_waiver_check "$tmp/short" 0 "$statelist"
 printf './var/lib/mysql/**\tmany\t1\tnowhere\tcount is not a number\n' > "$tmp/nan"
-assert_fail waiver-nan measure_waiver_check "$tmp/nan"
+assert_fail waiver-nan measure_waiver_check "$tmp/nan" 0 "$statelist"
 printf './var/lib/mysql/**\t1\t1\t\t\n' > "$tmp/nojust"
-assert_fail waiver-nojust measure_waiver_check "$tmp/nojust"
+assert_fail waiver-nojust measure_waiver_check "$tmp/nojust" 0 "$statelist"
 
 assert_eq free-summary-none "$(measure_free_summary "abc" "abc" "")" "nothing"
 assert_grep free-summary-num "a number or a timestamp" \
@@ -460,14 +478,12 @@ assert_grep free-summary-not "not a number" \
     "$(measure_free_summary "t=abcd" "t=" "")"
 
 # the shape helpers, and the cap check the executable passes a cap to
-assert_eq depth-none "$(measure_waiver_depth ./)" 0
-assert_eq depth-two "$(measure_waiver_depth ./var/lib)" 2
 assert_eq prefix-subtree "$(measure_waiver_prefix './var/lib/mysql/**')" "./var/lib/mysql"
 assert_eq prefix-exact "$(measure_waiver_prefix ./var/lib/mysql/ibdata1)" ""
 printf './var/lib/mysql/**\t1\t16777216\there\tthe sample cap bounds nothing\n' > "$tmp/capmax"
-assert_ok capmax-nocap measure_waiver_check "$tmp/capmax"
-assert_fail capmax-withcap measure_waiver_check "$tmp/capmax" 16777216
-assert_ok capmax-under measure_waiver_check "$tmp/capmax" 16777217
+assert_ok capmax-nocap measure_waiver_check "$tmp/capmax" 0 "$statelist"
+assert_fail capmax-withcap measure_waiver_check "$tmp/capmax" 16777216 "$statelist"
+assert_ok capmax-under measure_waiver_check "$tmp/capmax" 16777217 "$statelist"
 
 info "17b: measure_max_position"
 assert_eq maxpos-text "$(measure_max_position "$tmp/c2" "$tmp/c1")" 1

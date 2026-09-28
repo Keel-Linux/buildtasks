@@ -232,10 +232,10 @@ template.
 
 | Field | What it is for |
 |---|---|
-| `rule` | an exact path, or a named directory and its subtree as `DIR/**`, and nothing else. A glob that can reach a second subtree is refused, and so is one naming fewer than two components below `./`: counting literal characters said `./etc/ss*` was specific enough to waive an SSH host key and a TLS private key under one sentence |
+| `rule` | an exact path, or a named directory and its subtree as `DIR/**`, where `DIR` is a directory `share/layer-state-paths` itself declares, or below one. So `./var/lib/mysql/**` and `./etc/ssh/**` are allowed and `./var/lib/**` is not, because nothing declares `./var/lib`: it is the common parent of six subtrees the list names separately. Two measures were tried and both were wrong the same way, counting the literal characters of the glob (`./etc/ss*` has enough of them to waive an SSH host key and a TLS private key together) and counting its components below `./` (`./var/lib` has enough). The waiver vocabulary is now the vocabulary of the thing being waived |
 | `count` | how many differing state paths it covered when written. A run where it covers a different number **fails**, so a new file appearing in a waived directory cannot be swept in silently |
 | `max-position` | the largest position actually reported: a line number for text, a byte offset for a binary. A covered path differing beyond it is **not** waived, and a value at or past the sample cap is refused, because it bounds nothing |
-| `justified-against` | the capture directory and recipe commit it was read against. The directory is compared with `--dir` and the run fails if it does not match, so it cannot outlive its evidence |
+| `justified-against` | the capture directory and recipe commit it was read against. The first comma separated component is compared with `--dir` for equality and the run fails if it differs, so it cannot outlive its evidence |
 | `reason` | what was read, and what it was found to be |
 
 A waiver clears `overlapping` and nothing else: it cannot clear a `real`
@@ -318,6 +318,23 @@ from `real` to `overlapping`; only then is there anything for a waiver to
 clear. That the lever is luck about where the builds fall is a fair objection,
 and it is still the only one available, because teaching the tool to recognise
 a monotone run and downgrade it was declined on purpose.
+
+## What this cannot see
+
+A differential measurement sees differences. State that is **identical in
+every capture** is invisible to it by construction, and that includes the case
+that matters: a secret copied out of the base control's own build tree and
+baked into the component. Such a path never differs from the control, so it
+never enters the differing set, never reaches a verdict and never appears in
+the block. `share/layer-state-suspect` does not catch it either, for the same
+reason: that net reads the paths the floor subtracted, and a path that does
+not differ was never subtracted.
+
+So a PASS here means "nothing the change did shows up as a difference from the
+control". It does not mean "this layer ships no secret it should not". The
+instrument for that is a different one, reading a single image rather than
+comparing four, and `docs/traps.md`, "Every appliance built from `core` has
+the same machine-id", is what it would be looking for.
 
 ## Layout
 

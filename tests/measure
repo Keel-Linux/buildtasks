@@ -492,6 +492,12 @@ printf './var/lib/mysql/**\t2\t600\t/somewhere/else, recipe deadbeef\tread elsew
 r=$(attr u1 --cleared "$tmp/elsewhere" || true)
 assert_grep waiver-elsewhere "THIS RULE NAMES OTHER CAPTURES" "$r"
 assert_status waiver-elsewhere-status 1 attr u1 --cleared "$tmp/elsewhere"
+# and a directory that merely has the run's as a prefix is not the run's:
+# a substring test accepted mariadb-gate2 for a run on mariadb-gate
+printf './var/lib/mysql/**\t2\t600\t%s2, recipe deadbeef\tread next door\n' "$caps" > "$tmp/nextdoor"
+r=$(attr u1 --cleared "$tmp/nextdoor" || true)
+assert_grep waiver-nextdoor "THIS RULE NAMES OTHER CAPTURES" "$r"
+assert_status waiver-nextdoor-status 1 attr u1 --cleared "$tmp/nextdoor"
 # a glob written against one path that now covers two fails rather than
 # quietly taking the new one in
 printf './var/lib/mysql/**\t1\t99999\tfixtures\twritten when this matched one file\n' > "$tmp/stretch"

@@ -240,6 +240,7 @@ do_attribute() {
         || die "$EXIT_INPUT" "the captures cannot be compared"
     measure_waiver_check "${MEASURE_CLEARED:-/nonexistent}" \
         "$(measure_meta_get "$MEASURE_DIR/$MEASURE_CONTROL" state_max_bytes)" \
+        "$(measure_state_patterns "$MEASURE_DIR/$MEASURE_CONTROL/state-paths.txt")" \
         || die "$EXIT_INPUT" "the waiver file is not usable"
     measure_attribute_report "$MEASURE_DIR" "$MEASURE_UNIT" \
         "${MEASURE_CLEARED:-/nonexistent}" "$(suspect_paths_file)" \

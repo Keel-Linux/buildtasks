@@ -132,8 +132,8 @@ measures ten files:
 | bin/signature-lib | 76 of 76 | 100 percent |
 | bin/generate-signature | 87 of 87 | 100 percent |
 | bin/layer-measure-lib | 204 of 204 | 100 percent |
-| bin/layer-compare-lib | 298 of 298 | 100 percent |
-| bin/layer-report-lib | 253 of 253 | 100 percent |
+| bin/layer-compare-lib | 322 of 322 | 100 percent |
+| bin/layer-report-lib | 264 of 264 | 100 percent |
 | bt-layer-measure | 71 of 71 | 100 percent |
 
 The gate stays at 99, the lowest file rounded down. All four new files are at
@@ -238,6 +238,33 @@ per file shape, and a value at or past the cap is refused.
 The abbreviation cap hid 115 of the 135 non-`real` paths, and `noise` passes,
 so the one remaining route to a bad `noise` landed where no bytes were
 printed. Only `overlapping` is abbreviated now.
+
+## 2026-09-28: the third measure of glob breadth
+
+Two measures of how broad a waiver rule is were tried and both were wrong the
+same way, by being easier to write than to defend. Counting the literal
+characters of the glob let `./etc/ss*` through, which waives an SSH host key
+and a TLS private key under one sentence. Counting its components below `./`
+let `./var/lib/**` through, which is the common parent of the six subtrees
+`share/layer-state-paths` declares separately, so a justification about MariaDB
+accounts could clear PostgreSQL state in a later run whose count happened to
+match; and the counts coinciding is not luck, because the same component shape
+produces the same number of state files.
+
+The measure is now the project's own statement of what state is: a glob rule's
+directory has to be a directory the capture's state path list declares, or
+below one. `./var/lib/mysql/**` is allowed because the list names that
+directory, `./var/lib/**` is refused because nothing names `./var/lib`, and
+`./etc/ssh/**` stays allowed because `./etc/ssh/ssh_host_*` names it. A glob
+with no wildcard in its last component declares a file and no directory, so
+`./etc/shadow` does not license a waiver over `./etc`. `MEASURE_WAIVER_MIN_DEPTH`
+is gone, and the waiver vocabulary is the vocabulary of the thing being waived.
+The list is already digest checked across the captures, so this adds no new
+thing to trust.
+
+`justified-against` was a substring test, which accepted a waiver justified
+against `mariadb-gate2` for a run on `mariadb-gate`. Its first comma separated
+component is now compared for equality.
 
 ## 2026-09-28: pipefail in the three older suites
 
