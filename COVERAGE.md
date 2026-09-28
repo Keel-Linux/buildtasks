@@ -132,7 +132,7 @@ measures ten files:
 | bin/signature-lib | 76 of 76 | 100 percent |
 | bin/generate-signature | 87 of 87 | 100 percent |
 | bin/layer-measure-lib | 204 of 204 | 100 percent |
-| bin/layer-compare-lib | 189 of 189 | 100 percent |
+| bin/layer-compare-lib | 216 of 216 | 100 percent |
 | bin/layer-report-lib | 230 of 230 | 100 percent |
 | bt-layer-measure | 70 of 70 | 100 percent |
 

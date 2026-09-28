@@ -117,6 +117,14 @@ assert_ok text-plain measure_is_text "$tmp/t"
 assert_fail text-nul measure_is_text "$tmp/nul"
 assert_fail text-nonewline measure_is_text "$tmp/noeol"
 assert_fail text-longline measure_is_text "$tmp/longline"
+# a NUL-free binary that still carries control bytes is not text, because a
+# binary masked line by line can come out as noise
+printf 'header\x01\x02\x03\nbody\n' > "$tmp/ctrl"
+assert_fail text-controlbytes measure_is_text "$tmp/ctrl"
+# a TYPE=VIEW .frm is ASCII with newlines and really is text; mysql/user.frm
+# is one, and its only difference between builds is a timestamp line
+printf 'TYPE=VIEW\ntimestamp=0001790574106902134\nalgorithm=0\n' > "$tmp/viewfrm"
+assert_ok text-viewfrm measure_is_text "$tmp/viewfrm"
 assert_fail text-missing measure_is_text "$tmp/absent"
 
 info "2: measure_line, measure_common_prefix and measure_common_suffix"
@@ -266,6 +274,18 @@ v=$(verdict position-cap overlapping "$tmp/mu" "$tmp/mc1" "$tmp/mc2")
 assert_grep position-cap-why "too many" "$v"
 MEASURE_POSITION_MAX=$saved
 
+info "16b: a binary too different to compare offset by offset"
+saved_off=$MEASURE_OFFSET_MAX
+MEASURE_OFFSET_MAX=4
+head -c 64 /dev/urandom > "$tmp/big1"
+head -c 64 /dev/urandom > "$tmp/big2"
+head -c 64 /dev/urandom > "$tmp/bigu"
+v=$(verdict offset-cap overlapping "$tmp/bigu" "$tmp/big1" "$tmp/big2")
+assert_grep offset-cap-why "too many to compare" "$v"
+assert_ok truncated-yes measure_offsets_truncated "$tmp/big1" "$tmp/big2"
+MEASURE_OFFSET_MAX=$saved_off
+assert_fail truncated-no measure_offsets_truncated "$tmp/ba" "$tmp/bb"
+
 info "17: measure_cleared_reason"
 cat > "$tmp/cleared" <<'EOF'
 # a waiver is committed, and the report prints it
@@ -289,6 +309,15 @@ assert_grep evidence-noise-content "written" "$e"
 e=$(measure_evidence ./k "$tmp/ku" "$tmp/kc1" "$tmp/kc2")
 assert_grep evidence-binary "offset" "$e"
 assert_grep evidence-binary-size "size" "$e"
+# the bytes themselves, in capture order, which is what tells a clock that
+# climbs with capture time apart from a change only the unit has
+assert_grep evidence-window "in capture order" "$e"
+assert_grep evidence-window-unit "unit " "$e"
+assert_eq evidence-window-rows \
+    "$(grep -cE '^        (control|unit) ' <<<"$e")" 3
+# a text path gets no byte window, because its diff already shows the content
+e=$(measure_evidence ./etc/shadow "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_eq evidence-window-text "$(grep -c 'in capture order' <<<"$e")" 0
 e=$(measure_evidence ./x "$tmp/absent" "$tmp/c1" "$tmp/c2")
 assert_grep evidence-unsampled "not sampled" "$e"
 

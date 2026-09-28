@@ -40,8 +40,19 @@ MEASURE_TEXT_MAX_LINE=8192
 # is reported as overlapping rather than guessed at.
 MEASURE_POSITION_MAX=200
 
+# Above this many differing bytes a binary is reported as overlapping without
+# listing the offsets. A MariaDB ib_logfile0 is 100 MiB and two builds of it
+# differ almost everywhere; materialising that list would put tens of
+# millions of offsets into a shell variable.
+MEASURE_OFFSET_MAX=20000
+
 # The field separator inside a mask, which cannot occur in a text line.
 MEASURE_MASK_SEP=$'\001'
+
+# How many bytes of a window the binary evidence prints from each capture at
+# the first differing offset. Eight covers a 32 or 64 bit counter, which is
+# what most of these differences turn out to be.
+MEASURE_WINDOW_BYTES=8
 
 # How many lines of a diff the evidence block prints per pair, and how many
 # paths get a full three-way diff before the rest are abbreviated to their
@@ -57,7 +68,15 @@ MEASURE_EVIDENCE_PATHS=20
 # ---------------------------------------------------------------------------
 
 # measure_is_text FILE
-# No NUL, at least one newline, and no line long enough to be a blob.
+# No NUL, no control byte other than tab, newline and carriage return, at
+# least one newline, and no line long enough to be a blob. Being wrong here
+# is only safe in one direction: a binary treated as text gets masked line by
+# line and can come out `noise`, while a text file treated as binary comes out
+# `overlapping` and has to be cleared by hand. So the test is strict.
+#
+# It is strict rather than paranoid on purpose: mysql/user.frm is a TYPE=VIEW
+# definition, which really is a text file whose only difference between builds
+# is a `timestamp=` line, and calling it binary would bury that in a waiver.
 measure_is_text() {
     local f=$1
     if [[ ! -f "$f" ]]; then
@@ -68,6 +87,7 @@ measure_is_text() {
     all=$(wc -c < "$f")
     stripped=$(tr -d '\0' < "$f" | wc -c)
     [[ "$all" == "$stripped" ]] || return 1
+    [[ "$(tr -dc '\1-\10\13\14\16-\37\177' < "$f" | wc -c)" -eq 0 ]] || return 1
     [[ "$(tr -dc '\n' < "$f" | wc -c)" -gt 0 ]] || return 1
     [[ "$(wc -L < "$f")" -le "$MEASURE_TEXT_MAX_LINE" ]] || return 1
     return 0
@@ -123,8 +143,16 @@ measure_byte_offsets() {
         measure_error "cannot compare $1 with $2: one of them is not a file"
         return 1
     fi
-    cmp -l -- "$1" "$2" 2>/dev/null | awk '{ print $1 }' || true
+    cmp -l -- "$1" "$2" 2>/dev/null \
+        | awk -v m="$MEASURE_OFFSET_MAX" 'NR > m { exit } { print $1 }' || true
     return 0
+}
+
+# measure_offsets_truncated A B
+# True when the two files differ in at least MEASURE_OFFSET_MAX bytes, so the
+# offset list above is a prefix and cannot be subtracted from anything.
+measure_offsets_truncated() {
+    [[ "$(measure_byte_offsets "$1" "$2" | grep -c . || true)" -ge "$MEASURE_OFFSET_MAX" ]]
 }
 
 # measure_pair_positions KIND A B
@@ -269,6 +297,10 @@ measure_verdict() {
     if measure_is_text "$base" && measure_is_text "$unit"; then
         kind=text
     fi
+    if [[ "$kind" == binary ]]; then
+        measure_verdict_binary "$unit" "$@"
+        return 0
+    fi
     local floor unit_pos outside n
     floor=$(measure_floor_positions "$kind" "$@")
     unit_pos=$(measure_pair_positions "$kind" "$base" "$unit")
@@ -276,10 +308,6 @@ measure_verdict() {
     if [[ -n "$outside" ]]; then
         printf 'real\t%s\n' \
             "differs where the controls do not vary: $(measure_nature_list "$outside")"
-        return 0
-    fi
-    if [[ "$kind" == binary ]]; then
-        measure_verdict_binary "$unit" "$@"
         return 0
     fi
     n=$(grep -c . <<<"$unit_pos" || true)
@@ -328,11 +356,24 @@ measure_verdict_text() {
 measure_verdict_binary() {
     local unit=$1 base=$2
     shift
-    local delta count dmin dmax cmin cmax
-    read -r dmin dmax < <(measure_range size "$@")
-    read -r cmin cmax < <(measure_range bytes "$@")
+    local delta count dmin dmax cmin cmax floor outside
     delta=$(( $(wc -c < "$unit") - $(wc -c < "$base") ))
     count=$(measure_byte_offsets "$base" "$unit" | grep -c . || true)
+    if measure_offsets_truncated "$base" "$unit"; then
+        printf 'overlapping\t%s\n' \
+            "at least $MEASURE_OFFSET_MAX bytes differ, too many to compare offset by offset; size delta $delta, and the evidence names the first of them"
+        return 0
+    fi
+    floor=$(measure_floor_positions binary "$@")
+    outside=$(measure_set_minus "$(measure_byte_offsets "$base" "$unit")" "$floor")
+    [[ -z "$outside" ]] || outside="@$outside"
+    if [[ -n "$outside" ]]; then
+        printf 'real\t%s\n' \
+            "differs at bytes the controls do not vary at: $(measure_nature_list "${outside//$'\n'/$'\n@'}")"
+        return 0
+    fi
+    read -r dmin dmax < <(measure_range size "$@")
+    read -r cmin cmax < <(measure_range bytes "$@")
     if [[ "$delta" -lt "$dmin" ]] || [[ "$delta" -gt "$dmax" ]]; then
         printf 'real\t%s\n' \
             "size moves by $delta bytes where the controls move by $dmin to $dmax"
@@ -373,7 +414,40 @@ measure_evidence() {
         measure_pair_evidence "$base" "$f"
         i=$((i + 1))
     done
+    measure_window_evidence "$unit" "$@"
     return 0
+}
+
+# measure_window_evidence UNIT CONTROL...
+# For a binary, the bytes themselves at the first offset that differs, from
+# every capture. This is what settles a difference by hand: read down the
+# column and a value that climbs with capture time is a clock, while a value
+# that changes only in the unit is the change being measured. Without it a
+# reviewer gets a list of offsets and no way to tell those apart.
+measure_window_evidence() {
+    local unit=$1 base=$2
+    shift
+    measure_is_text "$base" && return 0
+    local off f
+    off=$(measure_byte_offsets "$base" "$unit" | head -1)
+    [[ -n "$off" ]] || return 0
+    printf '      the %s bytes at offset %s, in capture order:\n' \
+        "$MEASURE_WINDOW_BYTES" "$off"
+    for f in "$@" "$unit"; do
+        printf '        %-12s %s\n' "$(measure_window_label "$f" "$unit")" \
+            "$(dd if="$f" bs=1 skip=$((off - 1)) count="$MEASURE_WINDOW_BYTES" \
+                status=none 2>/dev/null | od -An -tx1 | tr -s ' ' | tr -d '\n')"
+    done
+    return 0
+}
+
+# measure_window_label FILE UNIT
+measure_window_label() {
+    if [[ "$1" == "$2" ]]; then
+        echo unit
+    else
+        echo control
+    fi
 }
 
 # measure_pair_evidence A B

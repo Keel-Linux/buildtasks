@@ -224,6 +224,53 @@ path list, and are distinct from one another. The note this implements says
 those must hold "or nothing the comparison prints means anything"; recording
 them and never checking them is the same as not recording them.
 
+## What it said about mariadb, 2026-09-28
+
+The first real use, four captures on the build host, `SOURCE_DATE_EPOCH`
+1700000000, `core` as parent, three of them controls. The block is
+reproducible from `/mnt/builds/measure/mariadb-gate`.
+
+    attributable differences: 0
+    (also 0 against each single control pair)
+    state paths the unit pair differs at: 167
+      noise 102, overlapping 33, real 32, not sampled 0
+    subtracted as floor noise, and not state paths: 6
+    verdict: FAIL (0 attributable, 32 real, 33 overlapping and uncleared)
+
+Zero attributable, which is what the experiment in decision 0010 concluded,
+now against the union of three control pairs rather than one. What is new is
+the 167 state paths, which that measurement subtracted by name without
+opening.
+
+The 32 called `real` are almost all Aria index files, `*.MAI`, and the reason
+is worth knowing before the next component is measured: the Aria index header
+carries a Unix timestamp, and in 30 of the 32 it increases strictly in capture
+order. Three control builds moved only its low bytes; the unit build, four
+minutes later, carried into the byte above. So the difference is a clock whose
+carry three controls did not span. The evidence block prints the bytes from
+every capture at the first differing offset, in capture order, which is what
+makes that readable rather than a list of offsets:
+
+          the 8 bytes at offset 181, in capture order:
+            control       b9 fe 1a 00 00 00 00 00
+            control       b9 fe c6 00 00 00 00 00
+            control       b9 ff 64 00 00 00 00 00
+            unit          ba 00 04 00 00 00 00 00
+
+The 33 called `overlapping` are almost all `*.frm`, whose create and update
+timestamps sit at fixed offsets that every build moves together.
+
+`mysql/user.frm` is the one that came out `noise`, and correctly: `mysql.user`
+is a view over `global_priv`, its `.frm` really is a text file, and its only
+difference between builds is one `timestamp=` line that the mask the three
+controls establish there admits.
+
+This FAIL is the honest state of that measurement and not a defect in the
+component. Reaching PASS needs a decision that is not the tool's to make:
+either more control captures, until the floor spans the counter's carry, or a
+committed `--cleared` waiver saying the Aria header clock was read and
+accepted. Both are on the record; silently subtracting 167 paths was not.
+
 ## Layout
 
 Capture and formats in `bin/layer-measure-lib`, the verdicts in
