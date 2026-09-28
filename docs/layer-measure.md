@@ -184,8 +184,15 @@ field carries no more shape than a random byte field. Install-time text state
 varies by clocks, counters and log sequence numbers. A key, a hash, a hostname
 or a SQL fragment is not one of those.
 
-A line a control itself produced is admitted whatever its shape, because it is
-a value this recipe makes on its own.
+There is deliberately no exemption for a line a control itself produced. There
+was one, and it inverted the property the tool exists to have: the base capture
+is the first control, so a value copied from the second or third differs from
+the base, reaches the mask, and was waved through, while a *fresh* random value
+at the same path was flagged. The safe case was the one that failed. What makes
+a generated secret safe is that it is different every build, so matching a
+control is evidence of pinning rather than of freshness. `docs/traps.md`,
+"Every appliance built from `core` has the same machine-id", is that defect
+already recorded.
 
 One consequence worth having: the verdict no longer depends on when the gate
 ran. `mysql/user.frm`'s mask is 21 characters of prefix only because four
@@ -225,17 +232,18 @@ template.
 
 | Field | What it is for |
 |---|---|
-| `rule` | an exact path, or a glob carrying enough literal path to be a decision about somewhere. `*` is refused: it matches `./etc/shadow` |
+| `rule` | an exact path, or a named directory and its subtree as `DIR/**`, and nothing else. A glob that can reach a second subtree is refused, and so is one naming fewer than two components below `./`: counting literal characters said `./etc/ss*` was specific enough to waive an SSH host key and a TLS private key under one sentence |
 | `count` | how many differing state paths it covered when written. A run where it covers a different number **fails**, so a new file appearing in a waived directory cannot be swept in silently |
-| `max-position` | the highest differing byte offset or line number it was justified against. A covered path differing beyond it is **not** waived |
-| `justified-against` | the capture directory and recipe commit it was read against, so it cannot outlive its evidence |
+| `max-position` | the largest position actually reported: a line number for text, a byte offset for a binary. A covered path differing beyond it is **not** waived, and a value at or past the sample cap is refused, because it bounds nothing |
+| `justified-against` | the capture directory and recipe commit it was read against. The directory is compared with `--dir` and the run fails if it does not match, so it cannot outlive its evidence |
 | `reason` | what was read, and what it was found to be |
 
 A waiver clears `overlapping` and nothing else: it cannot clear a `real`
-difference. The block prints the file's digest, every rule, how many paths
-each one covered against how many it was written for, and **every cleared
-path with its bytes**. A waiver is the one place a person overrides the
-instrument, so it is the last place to withhold the evidence.
+difference, and it is not a route to PASS on its own. The block prints the
+file's digest, every rule, how many paths each one covered against how many it
+was written for, and **every cleared path with its bytes**. A waiver is the one
+place a person overrides the instrument, so it is the last place to withhold
+the evidence.
 
 ### What the floor removed
 
@@ -299,10 +307,17 @@ difference between builds is one `timestamp=` line that the mask the three
 controls establish there admits.
 
 This FAIL is the honest state of that measurement and not a defect in the
-component. Reaching PASS needs a decision that is not the tool's to make:
-either more control captures, until the floor spans the counter's carry, or a
-committed `--cleared` waiver saying the Aria header clock was read and
-accepted. Both are on the record; silently subtracting 167 paths was not.
+component. Reaching PASS takes two steps in order, and a waiver alone is not
+one of them: a waiver is consulted only for `overlapping`, and these 32 are
+`real`, so granting one would turn `FAIL (32 real, 33 overlapping)` into
+`FAIL (32 real, 0 overlapping)` and leave the 32 untouched.
+
+So it is more control captures **and then** a waiver. More controls, until the
+floor spans the Aria counter's carry, is the only lever that moves those 32
+from `real` to `overlapping`; only then is there anything for a waiver to
+clear. That the lever is luck about where the builds fall is a fair objection,
+and it is still the only one available, because teaching the tool to recognise
+a monotone run and downgrade it was declined on purpose.
 
 ## Layout
 

@@ -193,6 +193,52 @@ collapses to 9. `tests/compare` runs that case: the clock is `noise` and the
 payload is not, at either prefix length, because the criterion is now the
 field's width and class rather than how much framing survived.
 
+## 2026-09-28: the exemption that inverted the property
+
+The third review found one line that undid the pinning rule it sat inside.
+`measure_mask_admits` admitted a unit line identical to *any* control's line
+at that position, ahead of every pin, on the grounds that it was "a value this
+recipe makes on its own". The base capture is the first control, so a value
+copied from the second or third differs from the base, is flagged as a
+differing position, and was then waved through. Verified against three
+controls: a unit shipping the host key control 2 produced came out `noise`,
+the machine-id control 3 produced came out `noise`, a replayed root hash came
+out `noise`, and a *fresh random* key at the same path came out
+`overlapping`. The safe case was the one that failed.
+
+The rationale was true and did not support the conclusion. What makes a
+generated secret safe is that it is different every build, so matching a
+control is evidence of pinning rather than of freshness; `docs/traps.md`,
+"Every appliance built from `core` has the same machine-id", is that defect
+already recorded in this project. The early return is deleted. It cost
+nothing: a genuinely pinned field still passes on length and class, and two
+independent random values do not collide, so the branch only ever admitted
+replays. `tests/compare` carries the three replays and the fresh-key control.
+
+Also in that round, and each of them a measure that was easier to write than
+to defend:
+
+`MEASURE_WAIVER_MIN_LITERAL` counted the literal characters of a glob, and
+`./etc/ss*` has exactly the eight it required while covering an SSH host key
+and a TLS private key together. A rule is now an exact path or a named
+directory's subtree written `DIR/**`, with at least two components below
+`./`, and the paths it actually covers must sit under one immediate child of
+that directory. A directory is a thing somebody chose; a character count is
+not.
+
+`justified-against` was printed and never read, which is the shape
+`state_paths_sha256` had two rounds ago. The capture directory it names is now
+compared with `--dir` and the run fails when they differ.
+
+`share/layer-waivers.example` set `max-position` to the sample cap, which is
+past the end of anything that was sampled and so bounds nothing, on the line
+a maintainer copies. The template now carries real observed maxima, one rule
+per file shape, and a value at or past the cap is refused.
+
+The abbreviation cap hid 115 of the 135 non-`real` paths, and `noise` passes,
+so the one remaining route to a bad `noise` landed where no bytes were
+printed. Only `overlapping` is abbreviated now.
+
 ## 2026-09-28: pipefail in the three older suites
 
 `tests/layer`, `tests/aplinfo` and `tests/signature` did not set `pipefail`

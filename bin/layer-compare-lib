@@ -257,8 +257,16 @@ measure_free_region() {
 #   a free region is longer than MEASURE_FREE_MAX, or carries a character
 #   outside MEASURE_FREE_CLASS or outside what the controls themselves used.
 #
-# A LINE a control itself produced is pinned by observation and admitted
-# whatever its shape, because it is a value this recipe makes on its own.
+# There is deliberately no exemption for a line a control itself produced.
+# There was one, and it inverted the property this whole file exists to
+# have: the base capture is the first control, so a value copied from the
+# second or third differs from the base, reaches here, and was waved
+# through, while a fresh random value at the same path was flagged. The safe
+# case was the one that failed. What makes a generated secret safe is that
+# it is different every build, so matching a control is evidence of pinning
+# rather than of freshness; docs/traps.md, "Every appliance built from core
+# has the same machine-id", is that defect already recorded. A genuinely
+# pinned field still passes below, on length and class, like any other.
 measure_mask_admits() {
     local line=$1 prefix=$2 suffix=$3
     shift 3
@@ -266,7 +274,6 @@ measure_mask_admits() {
     for v in "$@"; do
         [[ -n "$first" ]] || first=$v
         [[ "$v" == "$first" ]] || same=no
-        [[ "$line" != "$v" ]] || return 0
     done
     [[ "$same" == no ]] || return 1
     [[ -n "$prefix" ]] || [[ -n "$suffix" ]] || return 1
@@ -360,8 +367,17 @@ measure_free_pinned() {
 # overrides the instrument.
 MEASURE_WAIVER_FIELDS=5
 
-# The least literal path a glob rule has to carry. "*" matches ./etc/shadow.
-MEASURE_WAIVER_MIN_LITERAL=8
+# A rule is an exact path, or a named directory and its whole subtree
+# written as DIR/**, and nothing else. Counting the literal characters of a
+# glob was the previous test and it was the wrong measure: ./etc/ss* has
+# eight of them and waives an SSH host key and a TLS private key together.
+# A directory is a thing somebody chose; a character count is not.
+#
+# The directory also has to be at least this many components below ./, so
+# ./etc/** and ./** cannot be written, and the paths a rule actually covers
+# have to sit under one immediate child of it, which is what "one rule per
+# subtree" means and is checked against the run in bin/layer-report-lib.
+MEASURE_WAIVER_MIN_DEPTH=2
 
 # measure_waiver_rules FILE -> the rules, one per line, comments gone
 measure_waiver_rules() {
@@ -369,9 +385,12 @@ measure_waiver_rules() {
     sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
 }
 
-# measure_waiver_check FILE
+# measure_waiver_check FILE [SAMPLE_CAP]
+# SAMPLE_CAP is the capture's --state-max-bytes. A max-position at or past
+# it bounds nothing, because nothing larger was ever sampled, and it is the
+# figure a template invites somebody to copy.
 measure_waiver_check() {
-    local file=$1 line rule count max rest literal rc=0 n=0
+    local file=$1 cap=${2:-0} line rule count max rest rc=0 n=0
     [[ -f "$file" ]] || return 0
     local -a lines=()
     mapfile -t lines < <(measure_waiver_rules "$file")
@@ -383,9 +402,8 @@ measure_waiver_check() {
             rc=1
             continue
         fi
-        literal=${rule//[*?]/}
-        if [[ ${#literal} -lt $MEASURE_WAIVER_MIN_LITERAL ]]; then
-            measure_error "$file line $n: '$rule' is too broad to be a decision about anywhere; a rule needs at least $MEASURE_WAIVER_MIN_LITERAL characters of literal path"
+        if ! measure_waiver_rule_shape "$rule"; then
+            measure_error "$file line $n: '$rule' is not an exact path nor a named directory's subtree; write either ./a/b/c or ./a/b/** with at least $MEASURE_WAIVER_MIN_DEPTH components below ./, so that what it covers is a directory somebody chose"
             rc=1
         fi
         if [[ ! "$count" =~ ^[0-9]+$ ]] || [[ ! "$max" =~ ^[0-9]+$ ]]; then
@@ -393,8 +411,44 @@ measure_waiver_check() {
             rc=1
         fi
         [[ -n "$rest" ]] || { measure_error "$file line $n: no justification"; rc=1; }
+        if [[ "$cap" -gt 0 ]] && [[ "$max" =~ ^[0-9]+$ ]] && [[ "$max" -ge "$cap" ]]; then
+            measure_error "$file line $n: max-position $max is at or past the sample cap $cap, so it bounds nothing; use the largest offset or line the block actually reported for that path"
+            rc=1
+        fi
     done
     return $rc
+}
+
+# measure_waiver_rule_shape RULE
+# An exact path with no wildcard at all, or DIR/** where DIR has none.
+measure_waiver_rule_shape() {
+    local rule=$1 dir
+    [[ "$rule" == ./* ]] || return 1
+    if [[ "$rule" != *[*?]* ]]; then
+        return 0
+    fi
+    [[ "$rule" == */'**' ]] || return 1
+    dir=${rule%/'**'}
+    [[ "$dir" != *[*?]* ]] || return 1
+    [[ "$(measure_waiver_depth "$dir")" -ge "$MEASURE_WAIVER_MIN_DEPTH" ]] || return 1
+    return 0
+}
+
+# measure_waiver_depth DIR -> how many components it names below ./
+measure_waiver_depth() {
+    local d=${1#./}
+    d=${d%/}
+    if [[ -z "$d" ]]; then
+        echo 0
+        return 0
+    fi
+    awk -F/ '{ print NF }' <<<"$d"
+}
+
+# measure_waiver_prefix RULE -> the directory a subtree rule names, or nothing
+measure_waiver_prefix() {
+    [[ "$1" == */'**' ]] || return 0
+    printf '%s\n' "${1%/'**'}"
 }
 
 # measure_cleared_rule FILE PATH MAXPOS -> the whole rule line that covers

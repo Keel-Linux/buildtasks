@@ -229,9 +229,15 @@ assert_fail admits-class measure_mask_admits "# written abcd" "# written " "" \
 # controls that agree at a line establish no varying shape at all
 assert_fail admits-noshape measure_mask_admits "# written 4000" "# written 1000" "" \
     "# written 1000" "# written 1000"
-# a unit line one of the controls itself produced is pinned by observation
-assert_ok admits-observed measure_mask_admits "# written 2000" "# written " "000" \
+# a unit line one of the controls produced is NOT admitted for being
+# observed: a generated secret is safe because it is different every build,
+# so matching a control is evidence of pinning, not of freshness. It is
+# admitted here only because a one digit decimal is pinned by length and
+# class like any other
+assert_ok admits-pinned-digit measure_mask_admits "# written 2000" "# written " "000" \
     "# written 1000" "# written 2000"
+assert_fail admits-replay measure_mask_admits "k=AAAABBBBCCCC" "k=" "" \
+    "k=AAAABBBBCCCC" "k=DDDDEEEEFFFF"
 # and a free region longer than the cap is never pinned
 long=$(head -c 40 /dev/zero | tr '\0' '7')
 assert_fail admits-toolong measure_mask_admits "t=$long" "t=" "" "t=1111111111" "t=2222222222"
@@ -360,6 +366,36 @@ not_noise attack-userfrm "$tmp/vunit" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
 printf 'TYPE=VIEW\ntimestamp=0001790574106902139\n' > "$tmp/vclock"
 verdict clock-still-noise noise "$tmp/vclock" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
 
+info "16c2: a value copied from a control is a replay, not freshness"
+# docs/traps.md, "Every appliance built from core has the same machine-id":
+# a generated value baked into a layer is a defect, not a licence. The unit
+# ships, byte for byte, what the second or third control produced, which
+# differs from the base capture and so reaches the mask
+replay() { printf '%s\n' "$2" > "$1"; }
+replay "$tmp/rk1" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMONEEEEEEEEEEE root@keel"
+replay "$tmp/rk2" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMTWOOOOOOOOOOO root@keel"
+replay "$tmp/rk3" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMTHREEEEEEEEEE root@keel"
+cp "$tmp/rk2" "$tmp/rkunit"
+not_noise replay-hostkey "$tmp/rkunit" "$tmp/rk1" "$tmp/rk2" "$tmp/rk3" >/dev/null
+replay "$tmp/rm1" "1f0c1d4a6b7e4f0a9c2d3e4f5a6b7c8d"
+replay "$tmp/rm2" "2a1b2c3d4e5f60718293a4b5c6d7e8f9"
+replay "$tmp/rm3" "3b2c3d4e5f60718293a4b5c6d7e8f9a0"
+cp "$tmp/rm3" "$tmp/rmunit"
+not_noise replay-machineid "$tmp/rmunit" "$tmp/rm1" "$tmp/rm2" "$tmp/rm3" >/dev/null
+# shellcheck disable=SC2016  # literal crypt prefixes, not expansions
+i=0
+for h in Kq7xPnZa2WdLbTvE Rm3JcYs8HgUpNfXo Zt9BwQe4VkAiDrLs; do
+    i=$((i + 1))
+    # shellcheck disable=SC2016  # a literal crypt prefix, not an expansion
+    printf 'root:$y$j9T$%s:20000:0:99999:7:::\n' "$h" > "$tmp/rs$i"
+done
+cp "$tmp/rs2" "$tmp/rsunit"
+not_noise replay-shadow "$tmp/rsunit" "$tmp/rs1" "$tmp/rs2" "$tmp/rs3" >/dev/null
+# and a fresh random value at the same path is flagged too, so the safe case
+# is no longer the only one that is
+replay "$tmp/rkfresh" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMFOURRRRRRRRRR root@keel"
+not_noise fresh-hostkey "$tmp/rkfresh" "$tmp/rk1" "$tmp/rk2" "$tmp/rk3" >/dev/null
+
 info "16d: the verdict does not depend on where the builds fell"
 # the review's point: the user.frm mask was 21 characters of prefix only
 # because four builds landed inside the same thousand seconds, and a
@@ -399,11 +435,17 @@ assert_eq cleared-nofile "$(measure_cleared_rule "$tmp/absent" ./etc/shadow 1)" 
 # sentence, and the report names every path it covered
 assert_grep cleared-glob "initdb output" \
     "$(measure_cleared_reason "$(measure_cleared_rule "$tmp/cleared" ./var/lib/postgresql/17/main/PG_VERSION 10)")"
-# a rule with too little literal path is a decision about nowhere
-printf '*\t1\t1\tnowhere\tanything\n' > "$tmp/broad"
-assert_fail waiver-broad measure_waiver_check "$tmp/broad"
-printf './etc/*\t1\t1\tnowhere\tstill too broad\n' > "$tmp/broad2"
-assert_fail waiver-broad2 measure_waiver_check "$tmp/broad2"
+# a glob is an exact path or a named directory and its subtree, and nothing
+# else: counting literal characters said ./etc/ss* was specific enough to
+# waive an SSH host key and a TLS private key under one sentence
+for bad in '*' './etc/*' './etc/ss*' './var/lib/*' './var/lib/my*/**' './etc/**' './**' './var/lib/mysql/*.MAD'; do
+    printf '%s\t1\t1\tnowhere\ttoo broad or not a subtree\n' "$bad" > "$tmp/broad"
+    assert_fail "waiver-broad-$bad" measure_waiver_check "$tmp/broad"
+done
+for good in './var/lib/mysql/**' './var/lib/mysql/mysql/global_priv.MAD' './etc/ssh/**'; do
+    printf '%s\t1\t1\tnowhere\ta named subtree or an exact path\n' "$good" > "$tmp/ok"
+    assert_ok "waiver-ok-$good" measure_waiver_check "$tmp/ok"
+done
 printf './var/lib/mysql/**\ttwo fields\n' > "$tmp/short"
 assert_fail waiver-fields measure_waiver_check "$tmp/short"
 printf './var/lib/mysql/**\tmany\t1\tnowhere\tcount is not a number\n' > "$tmp/nan"
@@ -416,6 +458,16 @@ assert_grep free-summary-num "a number or a timestamp" \
     "$(measure_free_summary "t=4000" "t=" "")"
 assert_grep free-summary-not "not a number" \
     "$(measure_free_summary "t=abcd" "t=" "")"
+
+# the shape helpers, and the cap check the executable passes a cap to
+assert_eq depth-none "$(measure_waiver_depth ./)" 0
+assert_eq depth-two "$(measure_waiver_depth ./var/lib)" 2
+assert_eq prefix-subtree "$(measure_waiver_prefix './var/lib/mysql/**')" "./var/lib/mysql"
+assert_eq prefix-exact "$(measure_waiver_prefix ./var/lib/mysql/ibdata1)" ""
+printf './var/lib/mysql/**\t1\t16777216\there\tthe sample cap bounds nothing\n' > "$tmp/capmax"
+assert_ok capmax-nocap measure_waiver_check "$tmp/capmax"
+assert_fail capmax-withcap measure_waiver_check "$tmp/capmax" 16777216
+assert_ok capmax-under measure_waiver_check "$tmp/capmax" 16777217
 
 info "17b: measure_max_position"
 assert_eq maxpos-text "$(measure_max_position "$tmp/c2" "$tmp/c1")" 1

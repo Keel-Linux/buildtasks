@@ -454,11 +454,12 @@ assert_grep attr-evidence-for-noise "control vs unit" "$r"
 assert_grep attr-subtracted-named "./var/log/alternatives.log" "$r"
 
 info "15: a waiver in writing clears an overlapping path and is printed"
-# rule, count, max-position, justified-against, reason
-cat > "$tmp/cleared" <<'EOF'
+# rule, count, max-position, justified-against, reason. The justification
+# has to name the captures being measured, so a waiver cannot outlive them.
+cat > "$tmp/cleared" <<EOF
 # checked by hand: both are install-time database state
-./var/lib/mysql/mysql/global_priv.MAD	1	64	fixtures, recipe deadbeef	creation stamps, read byte by byte on 2026-09-28
-./var/lib/mysql/ibdata1	1	600	fixtures, recipe deadbeef	InnoDB page header, read byte by byte on 2026-09-28
+./var/lib/mysql/mysql/global_priv.MAD	1	64	$caps, recipe deadbeef	creation stamps, read byte by byte on 2026-09-28
+./var/lib/mysql/ibdata1	1	600	$caps, recipe deadbeef	InnoDB page header, read byte by byte on 2026-09-28
 EOF
 r=$(attr u1 --cleared "$tmp/cleared")
 assert_grep attr-pass "verdict: PASS" "$r"
@@ -476,10 +477,21 @@ assert_status attr-pass-status 0 attr u1 --cleared "$tmp/cleared"
 info "15b: a waiver that is too broad, stretched, or malformed"
 printf '*\t1\t64\tnowhere\tanything at all\n' > "$tmp/broad"
 assert_status waiver-broad 3 attr u1 --cleared "$tmp/broad"
+printf './etc/ss*\t1\t64\tnowhere\tan SSH key and a TLS key under one sentence\n' > "$tmp/ss"
+assert_status waiver-ss 3 attr u1 --cleared "$tmp/ss"
 printf './var/lib/mysql/**\tonly two fields\n' > "$tmp/short"
 assert_status waiver-fields 3 attr u1 --cleared "$tmp/short"
 printf './var/lib/mysql/**\tmany\t64\tnowhere\tnot a number\n' > "$tmp/nan"
 assert_status waiver-count-nan 3 attr u1 --cleared "$tmp/nan"
+# a max-position at or past the sample cap bounds nothing, and it is the
+# figure a template invites somebody to copy
+printf './var/lib/mysql/**\t1\t16777216\t%s\tthe sample cap, which bounds nothing\n' "$caps" > "$tmp/capmax"
+assert_status waiver-capmax 3 attr u1 --cleared "$tmp/capmax"
+# a waiver read against other captures does not carry to these
+printf './var/lib/mysql/**\t2\t600\t/somewhere/else, recipe deadbeef\tread elsewhere\n' > "$tmp/elsewhere"
+r=$(attr u1 --cleared "$tmp/elsewhere" || true)
+assert_grep waiver-elsewhere "THIS RULE NAMES OTHER CAPTURES" "$r"
+assert_status waiver-elsewhere-status 1 attr u1 --cleared "$tmp/elsewhere"
 # a glob written against one path that now covers two fails rather than
 # quietly taking the new one in
 printf './var/lib/mysql/**\t1\t99999\tfixtures\twritten when this matched one file\n' > "$tmp/stretch"
@@ -494,8 +506,12 @@ r=$(attr u1 --cleared "$tmp/narrowmax" || true)
 assert_grep waiver-maxpos "overlapping .*ibdata1" "$r"
 
 info "16: a dirty unit, and a real difference inside the floor"
-assert_status attr-dirty 1 attr u2 --cleared "$tmp/cleared"
-r=$(attr u2 --cleared "$tmp/cleared" || true)
+# the dirty unit turns global_priv.MAD real, which no waiver can clear, so
+# its waiver names only the path that is still overlapping
+printf './var/lib/mysql/ibdata1\t1\t600\t%s, recipe deadbeef\tInnoDB page header\n' \
+    "$caps" > "$tmp/cleared-u2"
+assert_status attr-dirty 1 attr u2 --cleared "$tmp/cleared-u2"
+r=$(attr u2 --cleared "$tmp/cleared-u2" || true)
 assert_grep attr-dirty-fail "verdict: FAIL" "$r"
 assert_grep attr-attributable "./etc/keel/component.conf" "$r"
 assert_grep attr-added "./tmp/new-file" "$r"
@@ -507,6 +523,18 @@ assert_grep attr-real-shadow "real .*/etc/shadow" "$r"
 assert_grep attr-real-row "mysql" "$r"
 # a waiver cannot wave away a real difference, only an overlapping one
 assert_grep attr-real-binary "real .*global_priv" "$r"
+grep -q 'cleared .*global_priv' <<<"$r" && fatal "a waiver cleared a real difference"
+
+info "15c: one rule per subtree"
+# a rule naming a directory whose covered paths sit under two different
+# children of it is one sentence justifying two things
+printf './var/lib/**\t2\t600\t%s\tone rule spanning two subtrees\n' "$caps" > "$tmp/twosub"
+two=$(printf './var/lib/mysql/ibdata1\t./var/lib/**\n./var/lib/redis/dump.rdb\t./var/lib/**\n')
+r=$(measure_waiver_section "$tmp/twosub" "$two" 2 "$caps" 2>&1 || true)
+assert_grep waiver-twosub "SPANS 2 SUBTREES" "$r"
+one=$(printf './var/lib/mysql/ibdata1\t./var/lib/**\n./var/lib/mysql/x\t./var/lib/**\n')
+r=$(measure_waiver_section "$tmp/twosub" "$one" 2 "$caps" 2>&1)
+assert_grep waiver-onesub "rule ./var/lib/\*\*: 2 paths" "$r"
 
 info "16b: a waiver over the database cannot green a hardcoded host key"
 # the composition the review found: a waiver naming ./var/lib/mysql/** is
@@ -518,10 +546,10 @@ randkey() {
         "$(head -c 24 /dev/urandom | base64 | tr -d '=\n/+' | head -c 22)"
 }
 for pair in "c1 kc1" "c2 kc2" "c3 kc3" "u1 ku1"; do
-    set -- $pair
-    rm -rf "$fix/$2"; cp -a "$fix/$1" "$fix/$2"
-    mkdir -p "$fix/$2/etc/ssh"
-    randkey > "$fix/$2/etc/ssh/ssh_host_ed25519_key.pub"
+    read -r from to <<<"$pair"
+    rm -rf "${fix:?}/${to:?}"; cp -a "$fix/$from" "$fix/$to"
+    mkdir -p "$fix/$to/etc/ssh"
+    randkey > "$fix/$to/etc/ssh/ssh_host_ed25519_key.pub"
 done
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHARDCODEDKEYINTHEUNIT root@keel\n' \
     > "$fix/ku1/etc/ssh/ssh_host_ed25519_key.pub"
@@ -535,8 +563,8 @@ for t in kc1 kc2 kc3 ku1; do
     MEASURE_STATE_PATHS=$tmp/state-plus "$M" capture --dir "$caps" --layer mariadb \
         --parent core --tag "$t" > /dev/null
 done
-cat > "$tmp/db-waiver" <<'EOF'
-./var/lib/mysql/**	2	99999	fixtures, recipe deadbeef	database creation stamps, read on 2026-09-28
+cat > "$tmp/db-waiver" <<EOF
+./var/lib/mysql/**	2	99999	$caps, recipe deadbeef	database creation stamps, read on 2026-09-28
 EOF
 r=$("$M" attribute --dir "$caps" --unit ku1 --control kc1 --control-again kc2 \
     --control-again kc3 --cleared "$tmp/db-waiver" || true)
