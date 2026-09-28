@@ -207,19 +207,15 @@ echo "stub built \$layer from \$next"
 EOF
 chmod 755 "$builder"
 
-patterns=$tmp/state-paths
-cat > "$patterns" <<'EOF'
-# accounts, credentials and database state
-./etc/shadow
-./var/lib/mysql/**
-EOF
+# the committed list, which is what a capture is taken against in earnest
+# and what attribute anchors the capture's copy to
+patterns=$BT/share/layer-state-paths
 
 M=$BT/bt-layer-measure
 caps=$tmp/captures
 export MEASURE_BT_LAYER=$builder
 export MEASURE_LAYERS_DIR=$layers
 export MEASURE_LOCK=$tmp/build.lock
-export MEASURE_STATE_PATHS=$patterns
 
 capture() { # capture FIXTURE TAG [extra args...]
     local fixture=$1 tag=$2
@@ -283,8 +279,8 @@ assert_fail pkgs-notool env MEASURE_DPKG_QUERY=no-such-dpkg-query bash -c \
     "source '$BT/bin/layer-measure-lib'; measure_pkgs_record '$fix/c1'"
 
 info "5: measure_state_patterns"
-assert_eq patterns-two "$(measure_state_patterns "$patterns" | wc -l)" 2
-assert_eq patterns-first "$(measure_state_patterns "$patterns" | head -1)" "./etc/shadow"
+assert_grep patterns-shadow "^\./etc/shadow$" "$(measure_state_patterns "$patterns")"
+assert_grep patterns-mysql "^\./var/lib/mysql/\*\*$" "$(measure_state_patterns "$patterns")"
 assert_fail patterns-missing measure_state_patterns "$tmp/absent"
 : > "$tmp/empty-patterns"
 assert_fail patterns-empty measure_state_patterns "$tmp/empty-patterns"
@@ -559,26 +555,49 @@ for pair in "c1 kc1" "c2 kc2" "c3 kc3" "u1 ku1"; do
 done
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHARDCODEDKEYINTHEUNIT root@keel\n' \
     > "$fix/ku1/etc/ssh/ssh_host_ed25519_key.pub"
-cat > "$tmp/state-plus" <<'EOF'
-./etc/shadow
-./var/lib/mysql/**
-./etc/ssh/ssh_host_*
-EOF
 for t in kc1 kc2 kc3 ku1; do
     echo "$t" > "$layers/NEXT"
-    MEASURE_STATE_PATHS=$tmp/state-plus "$M" capture --dir "$caps" --layer mariadb \
-        --parent core --tag "$t" > /dev/null
+    "$M" capture --dir "$caps" --layer mariadb --parent core --tag "$t" > /dev/null
 done
 cat > "$tmp/db-waiver" <<EOF
 ./var/lib/mysql/**	2	99999	$caps, recipe deadbeef	database creation stamps, read on 2026-09-28
 EOF
-r=$("$M" attribute --dir "$caps" --unit ku1 --control kc1 --control-again kc2 \
-    --control-again kc3 --cleared "$tmp/db-waiver" || true)
+# these captures were taken against the wider list, so attribute has to be
+# run against the same one: the committed list is what licenses a waiver
+kattr() { "$M" attribute --dir "$caps" \
+    --unit ku1 --control kc1 --control-again kc2 --control-again kc3 "$@"; }
+r=$(kattr --cleared "$tmp/db-waiver" || true)
 assert_grep compose-key-named "ssh_host_ed25519_key.pub" "$r"
 assert_grep compose-key-fails "verdict: FAIL" "$r"
 grep -qE '^  noise .*ssh_host' <<<"$r" && fatal "compose: a hardcoded host key came back as noise"
-assert_status compose-status 1 "$M" attribute --dir "$caps" --unit ku1 \
-    --control kc1 --control-again kc2 --control-again kc3 --cleared "$tmp/db-waiver"
+assert_status compose-status 1 kattr --cleared "$tmp/db-waiver"
+
+info "16b2: the list a capture carries is anchored to the committed one"
+# captures taken against a list that is not the committed one: the digests
+# agree with each other, which is all the earlier check asked, and the run is
+# refused anyway, because that list licenses waiver rules as well as deciding
+# which bytes were kept
+{ cat "$patterns"; echo './var/lib/**'; } > "$tmp/state-wide"
+for t in wc1 wc2 wc3 wu1; do
+    echo "${t/w/k}" > "$layers/NEXT"
+    MEASURE_STATE_PATHS=$tmp/state-wide "$M" capture --dir "$caps" --layer mariadb \
+        --parent core --tag "$t" > /dev/null
+done
+wattr() { "$M" attribute --dir "$caps" --unit wu1 --control wc1 \
+    --control-again wc2 --control-again wc3 "$@"; }
+assert_status anchor-refused 3 wattr
+r=$(wattr 2>&1 || true)
+assert_grep anchor-why "state path list that is not" "$r"
+# and pointing the variable at the widened list does not move the anchor
+assert_status anchor-nomove 3 env "MEASURE_STATE_PATHS=$tmp/state-wide" \
+    "$M" attribute --dir "$caps" --unit wu1 --control wc1 --control-again wc2 \
+    --control-again wc3
+# declared, it runs, and the block says so beside both digests
+r=$(wattr --state-paths-override "captures predate the widened list, read by hand" || true)
+assert_grep anchor-override "OVERRIDE" "$r"
+assert_grep anchor-override-why "read by hand" "$r"
+assert_grep anchor-committed "^committed " "$r"
+assert_grep anchor-carried "captures agree on the list" "$r"
 
 info "17: blind because nothing was sampled"
 capture c1 s1 --state-max-bytes 8 > /dev/null

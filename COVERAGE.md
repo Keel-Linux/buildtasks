@@ -131,10 +131,10 @@ measures ten files:
 | bt-aplinfo | 47 of 47 | 100 percent |
 | bin/signature-lib | 76 of 76 | 100 percent |
 | bin/generate-signature | 87 of 87 | 100 percent |
-| bin/layer-measure-lib | 204 of 204 | 100 percent |
-| bin/layer-compare-lib | 322 of 322 | 100 percent |
-| bin/layer-report-lib | 264 of 264 | 100 percent |
-| bt-layer-measure | 71 of 71 | 100 percent |
+| bin/layer-measure-lib | 206 of 206 | 100 percent |
+| bin/layer-compare-lib | 330 of 330 | 100 percent |
+| bin/layer-report-lib | 270 of 270 | 100 percent |
+| bt-layer-measure | 77 of 77 | 100 percent |
 
 The gate stays at 99, the lowest file rounded down. All four new files are at
 100 percent line and branch: every subcommand, every exit code (0, 1, 2 and
@@ -265,6 +265,54 @@ thing to trust.
 `justified-against` was a substring test, which accepted a waiver justified
 against `mariadb-gate2` for a run on `mariadb-gate`. Its first comma separated
 component is now compared for equality.
+
+## 2026-09-28: anchoring the state path list to the repository
+
+The licensing rule of the previous section made `state-paths.txt` load bearing
+twice: it decides which bytes a capture keeps, and it decides which waiver
+rules are legal. `measure_preconditions` checked that every capture carried a
+byte identical list whose recorded digest matched, which says the operator was
+consistent with themselves and nothing more. Four captures taken against a
+list with `./var/lib/**` added agree with each other, license a `./var/lib/**`
+waiver, and let one sentence about MariaDB accounts clear PostgreSQL state.
+`share/layer-state-suspect` cannot catch it, and reports `0 subtracted but
+state shaped` throughout, because widening the list makes more paths state
+paths so nothing new is subtracted.
+
+`attribute` now also compares the capture's copy with the committed
+`share/layer-state-paths` and refuses on mismatch. A run against another list
+has to declare a reason with `--state-paths-override`, which the block prints
+as `OVERRIDE` beside both digests, and the block prints both digests in any
+case, because one digest with nothing to check it against is what the round
+about `state_paths_sha256` was about.
+
+Refusal rather than a printed warning, for the same reason: every other
+precondition here refuses, and the defect being closed is a field that was
+recorded and never read. A warning relies on somebody noticing.
+
+The anchor has no environment override. `MEASURE_STATE_PATHS` is a capture
+time knob and `attribute` ignores it entirely, including as a way of moving
+the anchor, so the property that pointing it at a narrower file changes
+nothing after the fact is unchanged. `tests/measure` now takes its captures
+against the committed list rather than a fixture list, which is the real
+configuration.
+
+### What the number does and does not say
+
+A mutation test of the six branches added with the licensing rule: three fail
+the suite when removed, which is coverage doing work (the
+wildcard-in-last-component guard in `measure_state_dirs`, the equality clause
+in `measure_dir_at_or_below`, and loosening that function's path boundary to a
+prefix match). Two survive because they are redundant, since removing them the
+licensing loop refuses the same inputs anyway: the no-wildcard-in-directory
+and empty-list guards in `measure_waiver_rule_shape`. They stay as defence in
+depth and a surviving mutant is the correct result for them.
+
+The sixth, the `*/*` guard in `measure_state_dirs` that skips a malformed
+entry with no slash in it, executed without being tested. It is tested now,
+`state-dirs-noslash` in `tests/compare`, because 100 percent line coverage
+with one line in it that no assertion would miss is a number claiming more
+than it has.
 
 ## 2026-09-28: pipefail in the three older suites
 

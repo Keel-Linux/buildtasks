@@ -390,6 +390,31 @@ measure_waiver_rules() {
     sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
 }
 
+# measure_list_anchored CAPTURE COMMITTED
+# The state path list decides two things: which bytes a capture kept, and
+# which waiver rules are legal. Checking it is identical across the captures
+# only says the operator was consistent with themselves. This says it is the
+# list the repository declares.
+#
+# Widening the list used to be harmless, because it only ever increased what
+# was compared by content. Once a waiver rule's directory has to be one the
+# list declares, widening it also widens the waiver vocabulary, so the same
+# knob acquired a second effect pointing the other way: adding ./var/lib/**
+# to the list makes a ./var/lib/** waiver legal, and one sentence about
+# MariaDB accounts then clears PostgreSQL state.
+measure_list_anchored() {
+    local capture=$1 committed=$2
+    if [[ ! -f "$committed" ]]; then
+        measure_error "no committed state path list at $committed"
+        return 1
+    fi
+    if [[ ! -f "$capture/state-paths.txt" ]]; then
+        measure_error "$capture carries no state path list"
+        return 1
+    fi
+    cmp -s -- "$capture/state-paths.txt" "$committed"
+}
+
 # measure_state_dirs GLOBS -> the directories a state path list declares
 #
 # A glob whose last component carries a wildcard declares the directory above

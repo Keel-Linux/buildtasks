@@ -84,6 +84,11 @@ floor, the attributable count and the verdict, so a claim like "0 attributable
 differences" says which command produced it and a reviewer can run that
 command again.
 
+A PASS in that block means nothing the change did shows up as a difference
+from the control. **It does not mean the layer ships no secret it should
+not**: see "What this cannot see" below, because the person over-reading a
+PASS is reading the block rather than that section.
+
 Exit status: 0 when the verdict is PASS, 1 when it is FAIL, 2 on a usage
 error, 3 when a capture, a build or a tool is missing.
 
@@ -116,10 +121,20 @@ A `mariadb` capture with the cap raised past `ib_logfile0` is about 150 MiB,
 so four of them are roughly 600 MiB.
 
 `attribute` reads the state path list from the captures, never from the
-environment. The list is what decides which bytes were kept, so a run cannot
-be made to look clean afterwards by pointing `MEASURE_STATE_PATHS` at a
-narrower file: all the captures must carry the same list, and their recorded
-digests must match it.
+environment, and anchors it to the committed `share/layer-state-paths`. Three
+things have to agree: every capture carries the same list, each capture's
+recorded digest matches the copy it carries, and that copy is the committed
+file. `MEASURE_STATE_PATHS` is a capture time knob and `attribute` ignores it
+entirely, including as a way of moving the anchor.
+
+The third of those exists because the list decides two things now. It decides
+which bytes a capture keeps, and, since a waiver rule's directory has to be one
+the list declares, it also decides which waivers are legal. Widening it used to
+be harmless in the only direction it acted; now the same knob points both ways,
+and adding `./var/lib/**` to it would make a `./var/lib/**` waiver legal.
+Captures taken against another list are refused unless the run declares a
+reason with `--state-paths-override`, which the block prints as `OVERRIDE`
+beside both digests.
 
 ### Why a tab, and why the path comes first
 
@@ -232,7 +247,7 @@ template.
 
 | Field | What it is for |
 |---|---|
-| `rule` | an exact path, or a named directory and its subtree as `DIR/**`, where `DIR` is a directory `share/layer-state-paths` itself declares, or below one. So `./var/lib/mysql/**` and `./etc/ssh/**` are allowed and `./var/lib/**` is not, because nothing declares `./var/lib`: it is the common parent of six subtrees the list names separately. Two measures were tried and both were wrong the same way, counting the literal characters of the glob (`./etc/ss*` has enough of them to waive an SSH host key and a TLS private key together) and counting its components below `./` (`./var/lib` has enough). The waiver vocabulary is now the vocabulary of the thing being waived |
+| `rule` | an exact path, or a named directory and its subtree as `DIR/**`, where `DIR` is a directory `share/layer-state-paths` itself declares, or below one. A declaration whose last component has no wildcard names a file and declares no directory, so `./etc/shadow` licenses nothing; and one with a wildcard in a *non-final* component, such as `./home/**/.ssh/**`, declares `./home/**/.ssh`, which is compared literally and which no wildcard-free rule can sit below, so it licenses nothing either. Both fail closed on purpose: the route for those paths is an exact-path waiver, and matching a glob against a glob here would put back the breadth ambiguity this rule exists to remove. So `./var/lib/mysql/**` and `./etc/ssh/**` are allowed and `./var/lib/**` is not, because nothing declares `./var/lib`: it is the common parent of six subtrees the list names separately. Two measures were tried and both were wrong the same way, counting the literal characters of the glob (`./etc/ss*` has enough of them to waive an SSH host key and a TLS private key together) and counting its components below `./` (`./var/lib` has enough). The waiver vocabulary is now the vocabulary of the thing being waived |
 | `count` | how many differing state paths it covered when written. A run where it covers a different number **fails**, so a new file appearing in a waived directory cannot be swept in silently |
 | `max-position` | the largest position actually reported: a line number for text, a byte offset for a binary. A covered path differing beyond it is **not** waived, and a value at or past the sample cap is refused, because it bounds nothing |
 | `justified-against` | the capture directory and recipe commit it was read against. The first comma separated component is compared with `--dir` for equality and the run fails if it differs, so it cannot outlive its evidence |

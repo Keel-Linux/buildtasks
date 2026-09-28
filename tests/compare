@@ -448,6 +448,16 @@ assert_grep cleared-glob "initdb output" \
 # so one sentence about MariaDB accounts could clear PostgreSQL state.
 assert_eq state-dirs "$(measure_state_dirs "$statelist" | paste -sd, -)" \
     "./etc/ssh,./etc/ssl/private,./home/**/.ssh,./var/lib/mysql,./var/lib/postgresql"
+# a malformed entry with no slash in it declares nothing: without this guard
+# ${glob%/*} would hand back the entry itself as a directory
+assert_eq state-dirs-noslash "$(measure_state_dirs "$(printf 'shadow*\n./var/lib/mysql/**')")" \
+    "./var/lib/mysql"
+assert_eq state-dirs-none "$(measure_state_dirs "$(printf './etc/shadow\n./etc/group')")" ""
+# a declaration with a wildcard in a non-final component licenses nothing,
+# because the comparison is literal. It fails closed on purpose: an exact
+# path waiver is the route for those, and a glob comparison here would put
+# the breadth ambiguity back
+assert_fail below-wildcard-decl measure_dir_at_or_below ./home/alice/.ssh './home/**/.ssh'
 assert_ok below-same measure_dir_at_or_below ./var/lib/mysql ./var/lib/mysql
 assert_ok below-deeper measure_dir_at_or_below ./var/lib/mysql/mysql ./var/lib/mysql
 assert_fail below-above measure_dir_at_or_below ./var/lib ./var/lib/mysql
@@ -484,6 +494,16 @@ printf './var/lib/mysql/**\t1\t16777216\there\tthe sample cap bounds nothing\n' 
 assert_ok capmax-nocap measure_waiver_check "$tmp/capmax" 0 "$statelist"
 assert_fail capmax-withcap measure_waiver_check "$tmp/capmax" 16777216 "$statelist"
 assert_ok capmax-under measure_waiver_check "$tmp/capmax" 16777217 "$statelist"
+
+info "17a: the list a capture carries is anchored to the committed one"
+printf './etc/shadow\n./var/lib/mysql/**\n' > "$tmp/committed"
+mkdir -p "$tmp/cap-ok" "$tmp/cap-wide"
+cp "$tmp/committed" "$tmp/cap-ok/state-paths.txt"
+printf './etc/shadow\n./var/lib/mysql/**\n./var/lib/**\n' > "$tmp/cap-wide/state-paths.txt"
+assert_ok anchored-same measure_list_anchored "$tmp/cap-ok" "$tmp/committed"
+assert_fail anchored-wide measure_list_anchored "$tmp/cap-wide" "$tmp/committed"
+assert_fail anchored-nocommitted measure_list_anchored "$tmp/cap-ok" "$tmp/absent"
+assert_fail anchored-nocapture measure_list_anchored "$tmp/absent" "$tmp/committed"
 
 info "17b: measure_max_position"
 assert_eq maxpos-text "$(measure_max_position "$tmp/c2" "$tmp/c1")" 1

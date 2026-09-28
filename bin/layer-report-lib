@@ -34,6 +34,13 @@ MEASURE_PRINT_MAX=40
 MEASURE_ATTRIBUTABLE=0
 MEASURE_SUSPECT_COUNT=0
 
+# The committed state path list the captures are anchored to, and the reason
+# given if they deliberately are not. Both are printed in the block, because
+# a digest with nothing to check it against is what the round about
+# state_paths_sha256 was about.
+MEASURE_COMMITTED_LIST=
+MEASURE_LIST_OVERRIDE=
+
 # ---------------------------------------------------------------------------
 # printing helpers
 # ---------------------------------------------------------------------------
@@ -251,6 +258,14 @@ measure_attribute_report() {
     printf '\n'
     printf 'state paths   %s captures agree on the list (sha256 %s)\n' \
         "$(( ${#c[@]} + 1 ))" "$(measure_meta_get "$dir/$base" state_paths_sha256 | cut -c1-16)"
+    if [[ -f "$MEASURE_COMMITTED_LIST" ]]; then
+        printf 'committed     %s (sha256 %s)\n' "$MEASURE_COMMITTED_LIST" \
+            "$(sha256sum < "$MEASURE_COMMITTED_LIST" | cut -c1-16)"
+    fi
+    if [[ -n "$MEASURE_LIST_OVERRIDE" ]]; then
+        printf 'OVERRIDE      the captures were taken against a list that is not the committed one, declared: %s\n' \
+            "$MEASURE_LIST_OVERRIDE"
+    fi
     printf 'unit          %s\n' "$(measure_describe "$dir" "$unit")"
     for tag in "${c[@]}"; do
         printf 'control       %s\n' "$(measure_describe "$dir" "$tag")"

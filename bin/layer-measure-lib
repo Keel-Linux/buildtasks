@@ -336,6 +336,7 @@ measure_parse_args() {
     MEASURE_UNIT=
     MEASURE_CONTROL2=()
     MEASURE_CLEARED=
+    MEASURE_LIST_OVERRIDE=
     MEASURE_HELP=
     MEASURE_CAP=$MEASURE_STATE_MAX_BYTES_DEFAULT
     local opt val
@@ -347,7 +348,7 @@ measure_parse_args() {
                 shift
                 continue
                 ;;
-            --dir|--layer|--parent|--tag|--a|--b|--control|--unit|--control-again|--state-max-bytes|--cleared)
+            --dir|--layer|--parent|--tag|--a|--b|--control|--unit|--control-again|--state-max-bytes|--cleared|--state-paths-override)
                 if [[ $# -lt 2 ]]; then
                     measure_error "$opt needs a value"
                     return 1
@@ -380,6 +381,7 @@ measure_parse_args() {
             --unit) MEASURE_UNIT=$val ;;
             --control-again) MEASURE_CONTROL2+=("$val") ;;
             --cleared) MEASURE_CLEARED=$val ;;
+            --state-paths-override) MEASURE_LIST_OVERRIDE=$val ;;
             --state-max-bytes) MEASURE_CAP=$val ;;
         esac
     done

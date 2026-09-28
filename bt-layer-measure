@@ -86,6 +86,13 @@ Options::
     --unit TAG          the build with the component supplied as a unit
     --control-again TAG another control build. Repeatable, and the floor is
                         the union over every pair of controls
+    --state-paths-override REASON
+                        run against captures whose state path list is not the
+                        committed \$BT/share/layer-state-paths. That list
+                        decides both which bytes were kept and which waiver
+                        rules are legal, so a mismatch is refused unless the
+                        run declares a reason, which the block prints as
+                        OVERRIDE beside both digests
     --cleared FILE      waivers, five tab separated fields per rule:
                         rule, count, max-position, justified-against, reason.
                         A state path whose difference coincides with the
@@ -106,7 +113,9 @@ Environment::
                         list is copied into each capture and 'attribute'
                         reads the copy, never this variable, so what a
                         measurement was blind to cannot be changed after the
-                        fact
+                        fact. 'attribute' also anchors that copy to the
+                        committed \$BT/share/layer-state-paths, which has no
+                        environment override at all
     MEASURE_SUSPECT_PATHS
                         names that look like state (default
                         \$BT/share/layer-state-suspect). A path the floor
@@ -150,6 +159,14 @@ EOF
 # environment variable while the printed block still looks provenanced.
 state_paths_file() {
     printf '%s\n' "${MEASURE_STATE_PATHS:-$BT/share/layer-state-paths}"
+}
+
+# The committed list, with no environment override on purpose. `attribute`
+# ignores MEASURE_STATE_PATHS entirely: that variable is a capture time knob,
+# and reading it here would let the anchor be moved to whatever the captures
+# happen to carry, which is the check disabling itself.
+committed_paths_file() {
+    printf '%s\n' "$BT/share/layer-state-paths"
 }
 
 suspect_paths_file() {
@@ -238,6 +255,13 @@ do_attribute() {
     measure_preconditions "$MEASURE_DIR" "$MEASURE_UNIT" \
         "$MEASURE_CONTROL" "${MEASURE_CONTROL2[@]}" \
         || die "$EXIT_INPUT" "the captures cannot be compared"
+    MEASURE_COMMITTED_LIST=$(committed_paths_file)
+    if ! measure_list_anchored "$MEASURE_DIR/$MEASURE_CONTROL" "$MEASURE_COMMITTED_LIST"; then
+        if [[ -z "$MEASURE_LIST_OVERRIDE" ]]; then
+            die "$EXIT_INPUT" "the captures were taken against a state path list that is not $MEASURE_COMMITTED_LIST; that list decides both which bytes were kept and which waiver rules are legal, so a run against another one has to say so with --state-paths-override REASON, which the block then prints"
+        fi
+        warning "the captures were taken against a list that is not the committed one; declared: $MEASURE_LIST_OVERRIDE"
+    fi
     measure_waiver_check "${MEASURE_CLEARED:-/nonexistent}" \
         "$(measure_meta_get "$MEASURE_DIR/$MEASURE_CONTROL" state_max_bytes)" \
         "$(measure_state_patterns "$MEASURE_DIR/$MEASURE_CONTROL/state-paths.txt")" \
