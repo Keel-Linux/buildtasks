@@ -1,0 +1,36 @@
+# Names that look like accounts, credentials or keys. A path matching one of
+# these that the noise floor subtracted, and that share/layer-state-paths
+# does not cover, fails the run: state at a path nobody listed is the
+# original defect relocated, and a count of subtracted paths hides it.
+#
+# The answer to a hit is one of two committed things: add the path to
+# share/layer-state-paths so its bytes are compared, or clear it in the
+# --cleared file with a reason. Both are visible in the block a pull
+# request quotes.
+
+*shadow*
+*passwd*
+*gshadow*
+*.htpasswd*
+*secret*
+*secrets*
+*credential*
+*token*
+*apikey*
+*api_key*
+*.pem
+*.key
+*_key
+*_key.pub
+*keyring*
+*.gpg
+*.asc
+*password*
+*passwd.d*
+*.my.cnf
+*.pgpass
+*.netrc
+*.npmrc
+*authorized_keys*
+*machine-id*
+*miniserv.users*

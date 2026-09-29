@@ -1,0 +1,501 @@
+#!/bin/bash
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# The blocks bt-layer-measure prints, and the preconditions it refuses to
+# measure without. Sourced after bin/layer-measure-lib and
+# bin/layer-compare-lib.
+#
+# Two rules this file exists to hold, both of them learned the hard way.
+#
+# Nothing the report subtracts is invisible. A count of 176 subtracted paths
+# told a reviewer nothing; the paths are named, and any of them whose name
+# looks like state (share/layer-state-suspect) fails the run rather than
+# passing unexamined, because state at a path nobody listed is the original
+# defect relocated.
+#
+# The floor is the union over every control pair. With two control captures
+# the mariadb residue is three files and with the other pair it is zero, so
+# a single pair decides the verdict by accident. --control-again is
+# repeatable and every pair contributes.
+
+# How many paths a report names before it says how many it left out.
+MEASURE_PRINT_MAX=40
+
+# Set by measure_attribute_report and read by the sections it calls, which
+# is how a verdict line reaches the totals without threading a dozen
+# arguments through three functions.
+MEASURE_ATTRIBUTABLE=0
+MEASURE_SUSPECT_COUNT=0
+
+# The committed state path list the captures are anchored to, and the reason
+# given if they deliberately are not. Both are printed in the block, because
+# a digest with nothing to check it against is what the round about
+# state_paths_sha256 was about.
+MEASURE_COMMITTED_LIST=
+MEASURE_LIST_OVERRIDE=
+# Non-empty when the anchor check found the captures' list is not the
+# committed one, which is the only case the OVERRIDE line may assert.
+MEASURE_LIST_DIVERGES=
+
+# ---------------------------------------------------------------------------
+# printing helpers
+# ---------------------------------------------------------------------------
+
+# measure_print_set LABEL SET
+measure_print_set() {
+    local label=$1 set=$2 n
+    n=$(grep -c . <<<"$set" || true)
+    [[ "$n" -gt 0 ]] || return 0
+    printf '  %s (%s):\n' "$label" "$n"
+    measure_lines "    " "$(head -n "$MEASURE_PRINT_MAX" <<<"$set")"
+    if [[ "$n" -gt "$MEASURE_PRINT_MAX" ]]; then
+        printf '    and %s more\n' "$((n - MEASURE_PRINT_MAX))"
+    fi
+    return 0
+}
+
+# measure_describe DIR TAG
+measure_describe() {
+    printf '%s  %s on %s, epoch %s, captured %s, %s packages, %s files, %s symlinks, %s state paths\n' \
+        "$2" \
+        "$(measure_meta_get "$1/$2" layer)" \
+        "$(measure_meta_get "$1/$2" parent)" \
+        "$(measure_meta_get "$1/$2" epoch)" \
+        "$(measure_meta_get "$1/$2" captured)" \
+        "$(measure_count "$1/$2/pkgs.tsv")" \
+        "$(measure_count "$1/$2/tree.tsv")" \
+        "$(measure_count "$1/$2/links.tsv")" \
+        "$(measure_count "$1/$2/state.tsv")"
+}
+
+# ---------------------------------------------------------------------------
+# preconditions
+# ---------------------------------------------------------------------------
+
+# measure_preconditions DIR UNIT CONTROL...
+# The note this implements says the captures must share SOURCE_DATE_EPOCH,
+# one recipe and one parent "or nothing the comparison prints means
+# anything". Recording that and never checking it is the same as not
+# recording it.
+measure_preconditions() {
+    local dir=$1 unit=$2
+    shift 2
+    local -a tags=("$unit" "$@")
+    local tag key want got base=$1 rc=0
+    for tag in "${tags[@]}"; do
+        measure_capture_check "$dir/$tag" || return 1
+    done
+    if [[ "$(printf '%s\n' "${tags[@]}" | LC_ALL=C sort -u | wc -l)" -ne "${#tags[@]}" ]]; then
+        measure_error "the same capture is named more than once: ${tags[*]}"
+        return 1
+    fi
+    for key in layer parent epoch; do
+        want=$(measure_meta_get "$dir/$base" "$key")
+        for tag in "${tags[@]}"; do
+            got=$(measure_meta_get "$dir/$tag" "$key")
+            if [[ "$got" != "$want" ]]; then
+                measure_error "$key differs between captures: $base says '$want', $tag says '$got'"
+                rc=1
+            fi
+        done
+    done
+    if [[ "$(measure_meta_get "$dir/$base" epoch)" == none ]]; then
+        measure_error "these captures were built without SOURCE_DATE_EPOCH, so every timestamp in them is free to move and no comparison of them means anything"
+        rc=1
+    fi
+    for tag in "${tags[@]}"; do
+        if ! cmp -s -- "$dir/$base/state-paths.txt" "$dir/$tag/state-paths.txt"; then
+            measure_error "$tag was captured against a different state path list than $base; the list is what decides which bytes were kept, so the two cannot be compared"
+            rc=1
+        fi
+        want=$(measure_meta_get "$dir/$tag" state_paths_sha256)
+        got=$(sha256sum < "$dir/$tag/state-paths.txt" | cut -d' ' -f1)
+        if [[ "$want" != "$got" ]]; then
+            measure_error "$tag records state_paths_sha256 $want and carries a list that hashes to $got"
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+# ---------------------------------------------------------------------------
+# compare: two captures
+# ---------------------------------------------------------------------------
+
+# measure_compare_one A B KIND
+measure_compare_one() {
+    local a=$1 b=$2 kind=$3
+    local onlya onlyb changed na nb nc
+    onlya=$(measure_only_in "$a/$kind.tsv" "$b/$kind.tsv")
+    onlyb=$(measure_only_in "$b/$kind.tsv" "$a/$kind.tsv")
+    changed=$(measure_changed "$a/$kind.tsv" "$b/$kind.tsv")
+    na=$(grep -c . <<<"$onlya" || true)
+    nb=$(grep -c . <<<"$onlyb" || true)
+    nc=$(grep -c . <<<"$changed" || true)
+    printf '%s: %s differing, %s only in the first, %s only in the second\n' \
+        "$kind" "$nc" "$na" "$nb"
+    measure_print_set "differing" "$changed"
+    measure_print_set "only in the first" "$onlya"
+    measure_print_set "only in the second" "$onlyb"
+    [[ $((na + nb + nc)) -eq 0 ]]
+}
+
+# measure_compare_report DIR A B
+measure_compare_report() {
+    local dir=$1 a=$2 b=$3 kind differs=0
+    echo "=== bt-layer-measure compare ==============================================="
+    printf 'command       bt-layer-measure compare --dir %s --a %s --b %s\n' "$dir" "$a" "$b"
+    printf 'first         %s\n' "$(measure_describe "$dir" "$a")"
+    printf 'second        %s\n' "$(measure_describe "$dir" "$b")"
+    for kind in pkgs links tree; do
+        measure_compare_one "$dir/$a" "$dir/$b" "$kind" || differs=1
+    done
+    if [[ $differs -eq 0 ]]; then
+        echo "the two captures are identical: same packages, same symlinks, same files"
+    fi
+    echo "============================================================================"
+    return $differs
+}
+
+# ---------------------------------------------------------------------------
+# attribute: one unit against every control pair
+# ---------------------------------------------------------------------------
+
+# measure_floor_set DIR KIND WHICH CONTROL...
+# The union over every control pair, which is what makes a residue mean
+# something rather than reflect which pair was named first.
+measure_floor_set() {
+    local dir=$1 kind=$2 which=$3
+    shift 3
+    local -a c=("$@")
+    local i j all=""
+    for i in $(seq 0 $(( ${#c[@]} - 1 ))); do
+        for j in $(seq 0 $(( ${#c[@]} - 1 ))); do
+            [[ $i -ne $j ]] || continue
+            if [[ "$which" == changed ]]; then
+                [[ $i -lt $j ]] || continue
+                all+=$(measure_changed "$dir/${c[$i]}/$kind.tsv" "$dir/${c[$j]}/$kind.tsv")$'\n'
+            else
+                all+=$(measure_only_in "$dir/${c[$i]}/$kind.tsv" "$dir/${c[$j]}/$kind.tsv")$'\n'
+            fi
+        done
+    done
+    [[ -n "${all//[$'\n']/}" ]] || return 0
+    LC_ALL=C sort -u <<<"$all" | grep .
+    return 0
+}
+
+# measure_pair_set DIR KIND WHICH BASE UNIT
+measure_pair_set() {
+    local dir=$1 kind=$2 which=$3 base=$4 unit=$5
+    case "$which" in
+        changed) measure_changed "$dir/$base/$kind.tsv" "$dir/$unit/$kind.tsv" ;;
+        gone) measure_only_in "$dir/$base/$kind.tsv" "$dir/$unit/$kind.tsv" ;;
+        added) measure_only_in "$dir/$unit/$kind.tsv" "$dir/$base/$kind.tsv" ;;
+    esac
+}
+
+# measure_attributable DIR KIND WHICH UNIT CONTROL...
+measure_attributable() {
+    local dir=$1 kind=$2 which=$3 unit=$4
+    shift 4
+    measure_set_minus "$(measure_pair_set "$dir" "$kind" "$which" "$1" "$unit")" \
+        "$(measure_floor_set "$dir" "$kind" "$which" "$@")"
+}
+
+# measure_state_differs DIR GLOBS UNIT BASE -> every state path the unit pair
+# differs at, changed, gone or added
+measure_state_differs() {
+    local dir=$1 globs=$2 unit=$3 base=$4
+    local path all=() sorted=()
+    mapfile -t all < <(measure_pair_set "$dir" tree changed "$base" "$unit"
+        measure_pair_set "$dir" tree gone "$base" "$unit"
+        measure_pair_set "$dir" tree added "$base" "$unit")
+    [[ ${#all[@]} -gt 0 ]] || return 0
+    mapfile -t sorted < <(printf '%s\n' "${all[@]}" | LC_ALL=C sort -u | grep . || true)
+    for path in "${sorted[@]}"; do
+        measure_state_match "$path" "$globs" && printf '%s\n' "$path"
+    done
+    return 0
+}
+
+# measure_suspect_check SET SUSPECTS -> the subtracted paths whose name looks
+# like state although no state path glob matches them
+measure_suspect_check() {
+    local set=$1 suspects=$2 path
+    [[ -n "$set" ]] || return 0
+    [[ -f "$suspects" ]] || return 0
+    local globs
+    globs=$(measure_state_patterns "$suspects") || return 0
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        measure_state_match "$path" "$globs" && printf '%s\n' "$path"
+    done <<<"$set"
+    return 0
+}
+
+# measure_attribute_report DIR UNIT CLEARED SUSPECTS CONTROL...
+measure_attribute_report() {
+    local dir=$1 unit=$2 cleared=$3 suspects=$4
+    shift 4
+    local -a c=("$@")
+    local base=${c[0]}
+    local globs_file=$dir/$base/state-paths.txt
+    local globs kind which set n tag i j
+    globs=$(measure_state_patterns "$globs_file") || return 1
+
+    echo "=== bt-layer-measure attribution ==========================================="
+    printf 'command       bt-layer-measure attribute --dir %s --unit %s --control %s' \
+        "$dir" "$unit" "$base"
+    for i in $(seq 1 $(( ${#c[@]} - 1 ))); do
+        printf ' --control-again %s' "${c[$i]}"
+    done
+    [[ ! -f "$cleared" ]] || printf ' --cleared %s' "$cleared"
+    printf '\n'
+    printf 'state paths   %s captures agree on the list (sha256 %s)\n' \
+        "$(( ${#c[@]} + 1 ))" "$(measure_meta_get "$dir/$base" state_paths_sha256 | cut -c1-16)"
+    if [[ -f "$MEASURE_COMMITTED_LIST" ]]; then
+        printf 'committed     %s (sha256 %s)\n' "$MEASURE_COMMITTED_LIST" \
+            "$(sha256sum < "$MEASURE_COMMITTED_LIST" | cut -c1-16)"
+    fi
+    # OVERRIDE asserts a mismatch, so it is printed only when the anchor
+    # check found one; a reason given on captures that do carry the
+    # committed list is still printed, as what it is
+    if [[ -n "$MEASURE_LIST_DIVERGES" ]]; then
+        printf 'OVERRIDE      the captures were taken against a list that is not the committed one, declared: %s\n' \
+            "$MEASURE_LIST_OVERRIDE"
+    elif [[ -n "$MEASURE_LIST_OVERRIDE" ]]; then
+        printf 'override      declared and not needed, the captures carry the committed list: %s\n' \
+            "$MEASURE_LIST_OVERRIDE"
+    fi
+    printf 'unit          %s\n' "$(measure_describe "$dir" "$unit")"
+    for tag in "${c[@]}"; do
+        printf 'control       %s\n' "$(measure_describe "$dir" "$tag")"
+    done
+    printf 'control pairs %s, and the floor below is their union\n' \
+        "$(( ${#c[@]} * (${#c[@]} - 1) / 2 ))"
+    echo
+
+    # the per-pair counts, so the swing that one pair can cause is visible
+    if [[ ${#c[@]} -gt 1 ]]; then
+        echo "attributable file differences if a single control pair were the floor:"
+        for i in $(seq 0 $(( ${#c[@]} - 1 ))); do
+            for j in $(seq $(( i + 1 )) $(( ${#c[@]} - 1 ))); do
+                printf '  %s vs %s: %s\n' "${c[$i]}" "${c[$j]}" \
+                    "$(grep -c . <<<"$(measure_set_minus \
+                        "$(measure_pair_set "$dir" tree changed "$base" "$unit")" \
+                        "$(measure_changed "$dir/${c[$i]}/tree.tsv" "$dir/${c[$j]}/tree.tsv")")" || true)"
+            done
+        done
+        echo "  (this command uses the union of all of them, below)"
+        echo
+    fi
+
+    local attributable=0 detail=""
+    for kind in pkgs links tree; do
+        for which in changed gone added; do
+            set=$(measure_attributable "$dir" "$kind" "$which" "$unit" "${c[@]}")
+            n=$(grep -c . <<<"$set" || true)
+            attributable=$((attributable + n))
+            [[ "$n" -gt 0 ]] || continue
+            detail="$detail$(measure_print_set "$kind $which" "$set")"$'\n'
+        done
+    done
+    MEASURE_ATTRIBUTABLE=$attributable
+    printf 'attributable differences: %s\n' "$attributable"
+    echo "  (the control-unit pair minus the union of every control pair, over"
+    echo "   packages, symlinks and files)"
+    [[ -z "$detail" ]] || printf '%s' "$detail"
+    echo
+
+    measure_state_section "$dir" "$unit" "$cleared" "$suspects" "$globs" "${c[@]}"
+}
+
+# measure_state_section DIR UNIT CLEARED SUSPECTS GLOBS CONTROL...
+measure_state_section() {
+    local dir=$1 unit=$2 cleared=$3 suspects=$4 globs=$5
+    shift 5
+    local -a c=("$@")
+    local base=${c[0]}
+    local paths path verdict why rule shown_verdict tag maxpos
+    local -a samples=()
+    local noise=0 real=0 overlapping=0 unsampled=0 none=0 waived=0 examined=0
+    local evidence="" shown=0 abbreviated=0 waivers=""
+
+    paths=$(measure_state_differs "$dir" "$globs" "$unit" "$base")
+    printf 'state paths the unit pair differs at: %s\n' "$(grep -c . <<<"$paths" || true)"
+    echo "  (a path that can hold accounts, credentials, keys or database content is"
+    echo "   never subtracted because it fell inside the floor: its bytes are compared"
+    echo "   against every control, and the evidence below is printed whatever the"
+    echo "   verdict, because the one mistake this scheme can make is to call a real"
+    echo "   difference noise)"
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        examined=$((examined + 1))
+        samples=()
+        for tag in "${c[@]}"; do
+            samples+=("$(measure_sample_path "$dir/$tag" "$path")")
+        done
+        IFS=$'\t' read -r verdict why < <(measure_verdict \
+            "$(measure_sample_path "$dir/$unit" "$path")" "${samples[@]}")
+        if [[ -z "$verdict" ]]; then
+            measure_error "no verdict for $path, which must not happen"
+            return 1
+        fi
+        rule=""
+        if [[ "$verdict" == overlapping ]]; then
+            maxpos=$(measure_max_position "$(measure_sample_path "$dir/$unit" "$path")" "${samples[0]}")
+            rule=$(measure_cleared_rule "$cleared" "$path" "$maxpos")
+        fi
+        shown_verdict=$verdict
+        if [[ -n "$rule" ]]; then
+            waived=$((waived + 1))
+            shown_verdict=cleared
+            waivers="$waivers$(printf '%s\t%s' "$path" "$(cut -f1 <<<"$rule")")"$'\n'
+        else
+            case "$verdict" in
+                noise) noise=$((noise + 1)) ;;
+                real) real=$((real + 1)) ;;
+                overlapping) overlapping=$((overlapping + 1)) ;;
+                unsampled) unsampled=$((unsampled + 1)) ;;
+                none) none=$((none + 1)) ;;
+            esac
+        fi
+        printf '  %-11s %s\n' "$shown_verdict" "$path"
+        printf '              %s\n' "$why"
+        if [[ -n "$rule" ]]; then
+            printf '              cleared by rule %s, justified against %s: %s\n' \
+                "$(cut -f1 <<<"$rule")" "$(cut -f4 <<<"$rule")" \
+                "$(measure_cleared_reason "$rule")"
+        fi
+        # a waiver is the one place a person overrides the instrument, so it
+        # is the last place to withhold the bytes
+        # `overlapping` is named in the totals and fails the run, so it is
+        # the only column the cap may abbreviate: `noise` passes, and a
+        # mistaken `noise` is the one error this scheme can still make
+        if [[ "$verdict" != overlapping ]] || [[ -n "$rule" ]] || [[ $shown -lt $MEASURE_EVIDENCE_PATHS ]]; then
+            shown=$((shown + 1))
+            evidence="$evidence$(measure_evidence "$path" "$(measure_sample_path "$dir/$unit" "$path")" "${samples[@]}")"$'\n'
+        else
+            abbreviated=$((abbreviated + 1))
+        fi
+    done <<<"$paths"
+    if [[ $((noise + real + overlapping + unsampled + none + waived)) -ne $examined ]]; then
+        measure_error "the verdict totals do not add up to the $examined paths examined"
+        return 1
+    fi
+    printf '  totals: noise %s, overlapping %s, real %s, not sampled %s, unchanged %s, cleared %s\n' \
+        "$noise" "$overlapping" "$real" "$unsampled" "$none" "$waived"
+    local stretched=0
+    measure_waiver_section "$cleared" "$waivers" "$waived" "$dir" || stretched=1
+    if [[ -n "$evidence" ]]; then
+        echo
+        echo "evidence, for every state path above:"
+        printf '%s' "$evidence"
+        [[ $abbreviated -eq 0 ]] || printf '  (%s more abbreviated to their summary line above)\n' "$abbreviated"
+    fi
+    echo
+
+    measure_subtracted_section "$dir" "$unit" "$suspects" "$globs" "${c[@]}"
+    local suspect=$MEASURE_SUSPECT_COUNT
+    echo
+    if [[ $((MEASURE_ATTRIBUTABLE + real + overlapping + unsampled + suspect + stretched)) -eq 0 ]]; then
+        echo "verdict: PASS"
+        echo "============================================================================"
+        return 0
+    fi
+    printf 'verdict: FAIL (%s attributable, %s real, %s overlapping and uncleared, %s not sampled, %s subtracted but state shaped, %s waiver rules stretched)\n' \
+        "$MEASURE_ATTRIBUTABLE" "$real" "$overlapping" "$unsampled" "$suspect" "$stretched"
+    echo "============================================================================"
+    return 1
+}
+
+# measure_subtracted_section DIR UNIT SUSPECTS GLOBS CONTROL...
+# What the floor removed, by name, because a count of 176 tells a reviewer
+# nothing. Sets MEASURE_SUSPECT_COUNT to the number of subtracted paths whose
+# name looks like state although the list does not cover them.
+measure_subtracted_section() {
+    local dir=$1 unit=$2 suspects=$3 globs=$4
+    shift 4
+    local -a c=("$@")
+    local base=${c[0]}
+    local inside path notstate="" suspect
+    inside=$(LC_ALL=C comm -12 <(measure_pair_set "$dir" tree changed "$base" "$unit" | LC_ALL=C sort -u) <(measure_floor_set "$dir" tree changed "${c[@]}" | LC_ALL=C sort -u))
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        measure_state_match "$path" "$globs" || notstate="$notstate$path"$'\n'
+    done <<<"$inside"
+    printf 'subtracted as floor noise, and not state paths: %s\n' \
+        "$(grep -c . <<<"$notstate" || true)"
+    measure_print_set "subtracted" "$notstate"
+    suspect=$(measure_suspect_check "$notstate" "$suspects")
+    if [[ -n "$suspect" ]]; then
+        echo "  these were subtracted and their names look like state; add them to"
+        echo "  share/layer-state-paths so their bytes are compared, or clear them:"
+        measure_lines "    " "$suspect"
+    fi
+    MEASURE_SUSPECT_COUNT=$(grep -c . <<<"$suspect" || true)
+    return 0
+}
+
+# measure_waiver_section FILE WAIVED_PATHS COUNT
+# The waiver file itself, its digest and every rule, then which rule covered
+# which path. A rule that covered a different number of paths than it was
+# written against fails the run, so a new file appearing in a waived
+# directory cannot be swept in without anybody noticing.
+measure_waiver_section() {
+    local file=$1 waivers=$2 waived=$3 dir=$4 rule count covered rc=0 prefix kids
+    echo
+    if [[ ! -f "$file" ]]; then
+        echo "waivers: none"
+        return 0
+    fi
+    printf 'waivers       %s (sha256 %s)\n' "$file" \
+        "$(sha256sum < "$file" | cut -c1-16)"
+    local -a lines=()
+    mapfile -t lines < <(measure_waiver_rules "$file")
+    for rule in "${lines[@]}"; do
+        [[ -n "$rule" ]] || continue
+        count=$(cut -f2 <<<"$rule")
+        covered=$(LC_ALL=C awk -F'\t' -v r="$(cut -f1 <<<"$rule")" '$2 == r { n++ } END { print n + 0 }' <<<"$waivers")
+        printf '  rule %s: %s paths (written against %s, max position %s)\n' \
+            "$(cut -f1 <<<"$rule")" "$covered" "$count" "$(cut -f3 <<<"$rule")"
+        printf '       against %s: %s\n' "$(cut -f4 <<<"$rule")" \
+            "$(measure_cleared_reason "$rule")"
+        # it cannot outlive its evidence: the captures it was read against
+        # have to be the captures being measured
+        # the first comma separated component, compared for equality: a
+        # substring test accepted a waiver justified against mariadb-gate2
+        # for a run on mariadb-gate
+        if [[ "$(cut -f4 <<<"$rule" | cut -d, -f1)" != "$dir" ]]; then
+            measure_error "the waiver for $(cut -f1 <<<"$rule") was justified against '$(cut -f4 <<<"$rule")', which does not name $dir; a waiver is a reading of particular captures and does not carry to others"
+            echo "       THIS RULE NAMES OTHER CAPTURES: $dir is not in its justification"
+            rc=1
+        fi
+        # one rule per subtree: everything it covered has to sit under one
+        # immediate child of the directory it names
+        prefix=$(measure_waiver_prefix "$(cut -f1 <<<"$rule")")
+        if [[ -n "$prefix" ]]; then
+            kids=$(LC_ALL=C awk -F'\t' -v r="$(cut -f1 <<<"$rule")" -v p="$prefix/" '$2 == r { s = substr($1, length(p) + 1); sub(/\/.*$/, "", s); print s }' <<<"$waivers" | LC_ALL=C sort -u | grep -c . || true)
+            if [[ "$kids" -gt 1 ]]; then
+                measure_error "the waiver for $(cut -f1 <<<"$rule") covers $kids different subtrees of $prefix; write one rule per subtree so that one sentence justifies one thing"
+                echo "       THIS RULE SPANS $kids SUBTREES of $prefix"
+                rc=1
+            fi
+        fi
+        if [[ "$covered" != "$count" ]]; then
+            measure_error "the waiver for $(cut -f1 <<<"$rule") was written against $count paths and covers $covered here; read the difference and rewrite it"
+            echo "       THIS RULE HAS STRETCHED: written against $count, covers $covered"
+            rc=1
+        fi
+    done
+    printf '  cleared in this run: %s paths, every one of them named above\n' "$waived"
+    return $rc
+}

@@ -26,6 +26,10 @@
 #     output, changelog mismatch warning, no changelog warning; signed run
 #     with -u and -o, verified with sqv or gpg; parse check of the index.
 
+# pipefail as the scripts under test set it: a library function that
+# inherits a pipeline's status must fail here and not in production.
+set -o pipefail
+
 fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
 info() { echo "INFO [$(basename "$0")]: $*"; }
 
