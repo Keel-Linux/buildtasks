@@ -25,7 +25,8 @@
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
 #     layer_audit_packages (clean, unconfigured package);
 #     layer_audit_keys (clean, no list, no root, a PKCS#8 key named by its
-#     image path, a key after a certificate, two OpenSSH and EC keys both
+#     image path, an OpenPGP secret key and not a public one,
+#     a key after a certificate, two OpenSSH and EC keys both
 #     named, a quoted marker, a binary, a symlink out of the tree, an example
 #     unlisted, listed, its digest elsewhere, its path with another digest,
 #     grep failing, grep missing, the committed list well formed);
@@ -426,6 +427,14 @@ out=$(layer_audit_keys "$keys_root" "$keys_list" 2>&1) && fatal "keys-openssh: s
 [[ "$out" == *"/etc/ssh/ssh_host_ed25519_key"* ]] || fatal "keys-openssh: ed25519 not named: $out"
 [[ "$out" == *"/etc/ssh/ssh_host_ecdsa_key"* ]] || fatal "keys-openssh: ecdsa not named: $out"
 rm "$keys_root/etc/ssh/ssh_host_ed25519_key" "$keys_root/etc/ssh/ssh_host_ecdsa_key"
+# an armoured OpenPGP secret key, whose header ends in BLOCK
+mkdir -p "$keys_root/root/.gnupg"
+printf -- '-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQ\n-----END PGP PRIVATE KEY BLOCK-----\n' > "$keys_root/root/.gnupg/secret.asc"
+expect_fail keys-pgp layer_audit_keys "$keys_root" "$keys_list"
+rm "$keys_root/root/.gnupg/secret.asc"
+# an armoured OpenPGP public key is not secret
+printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQ\n-----END PGP PUBLIC KEY BLOCK-----\n' > "$keys_root/root/.gnupg/public.asc"
+expect_ok keys-pgp-public layer_audit_keys "$keys_root" "$keys_list"
 # the marker quoted inside a line is not a key file
 printf 'marker = "-----BEGIN PRIVATE KEY-----"\n' > "$keys_root/usr/share/doc/ex/parser.py"
 expect_ok keys-quoted layer_audit_keys "$keys_root" "$keys_list"
