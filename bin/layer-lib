@@ -508,10 +508,14 @@ layer_audit_packages() {
 }
 
 # A private key is a file with a PEM private key header on a line of its own:
-# PKCS#8, PKCS#1 (RSA, DSA, EC) and OpenSSH, alone or after a certificate the
-# way a combined cert.pem holds one. A marker quoted inside a line is not, and
-# grep -I leaves out the binaries that carry the marker as a string.
-LAYER_PRIVATE_KEY_RE='^-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----$'
+# PKCS#8 (encrypted too), PKCS#1 (RSA, DSA, EC), OpenSSH and armoured OpenPGP
+# secret keys, alone or after a certificate the way a combined cert.pem holds
+# one. A marker quoted inside a line is not, and grep -I leaves out the
+# binaries that carry the marker as a string. Binary key formats (DER,
+# PKCS#12, Java keystores, PuTTY, a GnuPG private-keys-v1.d) are not seen;
+# none was in any layer on 2026-09-29, and one that appears needs its own
+# check rather than a wider pattern.
+LAYER_PRIVATE_KEY_RE='^-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----$'
 
 # Refuse a tree that carries a private key. Every image built from a layer
 # holds the same bytes, so a key in a layer is a key every machine shares and
