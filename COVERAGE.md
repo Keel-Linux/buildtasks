@@ -44,6 +44,21 @@ layer that carries an unconfigured or half-installed package, and `bt-layer`
 now treats a non-zero `make` as fatal instead of relying on the stamp alone.
 Both are covered by `tests/layer` (audit clean and audit unconfigured).
 
+## 2026-09-29: the private key audit
+
+`layer_audit_keys` refuses a layer whose tree holds a private key, since every
+machine built from the layer would share it (keel-core#8). It runs from
+`layer_check_build`, before anything is packed, and names every key it
+finds by its path in the image. The only keys it accepts are the inert
+package examples in `conf/layer-inert-keys`, each at its own path and digest.
+`tests/layer` covers each key format, a key after a certificate, the quoted
+marker, a binary, a symlink out of the tree, the list at its path and digest
+and nowhere else, a grep that fails or is missing, and a `bt-layer` run whose
+build leaks a host key (refused, no tarball, no manifest). Mutating the
+pattern, the digest match, the grep status check, `-I` or the symlink rule
+each turns the suite red. Coverage: layer-lib and bt-layer unchanged at one
+uncovered line each, the same lines as on 19.x.
+
 ## 2026-09-26: the signing identity
 
 `bin/generate-signature` no longer hardcodes TurnKey's release key. Its logic

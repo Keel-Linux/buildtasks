@@ -507,9 +507,67 @@ layer_audit_packages() {
     return 0
 }
 
+# A private key is a file with a PEM private key header on a line of its own:
+# PKCS#8, PKCS#1 (RSA, DSA, EC) and OpenSSH, alone or after a certificate the
+# way a combined cert.pem holds one. A marker quoted inside a line is not, and
+# grep -I leaves out the binaries that carry the marker as a string.
+LAYER_PRIVATE_KEY_RE='^-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----$'
+
+# Refuse a tree that carries a private key. Every image built from a layer
+# holds the same bytes, so a key in a layer is a key every machine shares and
+# anyone who downloads the layer has (keel-core#8): a host key is generated on
+# the machine or it does not exist. The only keys accepted are the inert
+# examples named in LIST, one "sha256 /path" per line, # starting a comment,
+# each at its own path and digest; a package update that changes one fails
+# here until a person has looked at the new file.
+layer_audit_keys() {
+    local rootfs=$1
+    local list=$2
+    local grep_bin=${LAYER_GREP:-grep}
+    local hits rc path digest
+    local -a found=()
+    if [[ ! -d "$rootfs" ]]; then
+        layer_error "no tree at $rootfs to audit for private keys"
+        return 1
+    fi
+    if [[ ! -f "$list" ]]; then
+        layer_error "no list of inert keys at $list"
+        return 1
+    fi
+    if ! command -v "$grep_bin" >/dev/null; then
+        layer_error "$grep_bin not available, cannot audit $rootfs for private keys"
+        return 1
+    fi
+    # grep exits 1 when nothing matches; anything above that is a scan that
+    # did not finish, which must not read as a clean tree
+    rc=0
+    hits=$("$grep_bin" -rlI -D skip -E "$LAYER_PRIVATE_KEY_RE" "$rootfs") || rc=$?
+    if [[ $rc -gt 1 ]]; then
+        layer_error "the private key scan of $rootfs failed with status $rc"
+        return 1
+    fi
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        digest=$(sha256sum "$path" | cut -d ' ' -f 1)
+        path=${path#"$rootfs"}
+        if ! awk -v d="$digest" -v p="$path" \
+            '!/^[[:space:]]*#/ && $1 == d && $2 == p { found = 1 } END { exit !found }' "$list"; then
+            found+=("$path")
+        fi
+    done <<< "$hits"
+    if [[ ${#found[@]} -gt 0 ]]; then
+        layer_error "private keys in $rootfs, which every machine built from it would share:"
+        printf '  %s\n' "${found[@]}" >&2
+        echo "  remove them in the build (removelists-final) or, for an inert example, list it in $list" >&2
+        return 1
+    fi
+    return 0
+}
+
 layer_check_build() {
     local kind=$1
     local build_dir=$2
+    local inert_keys=$3
     local dir
     if [[ ! -f "$build_dir/stamps/root.patched" ]]; then
         layer_error "$build_dir/stamps/root.patched missing - build failed or not run"
@@ -520,6 +578,9 @@ layer_check_build() {
         return 1
     fi
     if ! layer_audit_packages "$build_dir/root.patched"; then
+        return 1
+    fi
+    if ! layer_audit_keys "$build_dir/root.patched" "$inert_keys"; then
         return 1
     fi
     if [[ "$kind" == delta ]]; then
