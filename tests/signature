@@ -26,6 +26,10 @@
 #     file behind; and the upstream key on an upstream artifact, which must
 #     produce the text of tests/signature-reference byte for byte.
 
+# pipefail as the scripts under test set it: a library function that
+# inherits a pipeline's status must fail here and not in production.
+set -o pipefail
+
 fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
 info() { echo "INFO [$(basename "$0")]: $*"; }
 
@@ -240,7 +244,8 @@ export RELEASE=debian/trixie
 unset BT_GPGKEY BT_SIGN_KEY_FILE BT_SIGN_KEY_EMAIL BT_SIGN_KEY_URL BT_SIGN_KEY_FPR
 
 info "6: usage and early failures"
-"$GS" --help | grep -q '^Syntax:' || fatal "help text missing"
+help_out=$("$GS" --help || true)   # usage exits non-zero, and pipefail sees it
+grep -q '^Syntax:' <<<"$help_out" || fatal "help text missing"
 expect_fail no-args "$GS"
 expect_fail two-files "$GS" a b
 expect_fail unknown-option "$GS" --sign-everything file

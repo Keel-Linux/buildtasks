@@ -1,0 +1,533 @@
+#!/bin/bash -e
+# Test bin/layer-compare-lib: the part that decides whether a difference at a
+# state path is noise or the change being measured.
+#
+# The rule this suite exists to hold. A token that records only *where* two
+# files differ cancels a real difference against a coincidental one at the
+# same position. Every case below was a false negative of the first
+# implementation, which reported them as noise, printed no evidence and
+# exited 0:
+#
+#   an account added to /etc/shadow at the line number the control pair also
+#   appends at; a root password set on the line the control pair rewrites for
+#   a clock reason; a binary differing at the same offsets as the control pair
+#   but with different byte values; a length change of -3584 bytes against a
+#   control pair that varies by +1.
+#
+# So a position is not enough. The control captures are the model of what
+# varies, and the unit is admitted only if its *content* at that position is
+# the kind of variation the controls show there: the longest common prefix
+# and suffix of the control variants of that line. A mask with neither
+# prefix nor suffix explains nothing and never yields noise, and bytes are
+# never provable at all, so a binary coincidence is `overlapping`, which
+# fails until somebody clears it in writing.
+#
+# Code paths covered:
+#   measure_is_text (text, NUL, no newline, over-long line, missing);
+#   measure_line; measure_common_prefix and measure_common_suffix (none,
+#   partial, whole, one string, empty); measure_text_positions (same,
+#   changed, added, removed); measure_byte_offsets (same, differing, shorter);
+#   measure_pair_positions (text, binary); measure_floor_positions (one pair,
+#   three controls, identical controls); measure_range (single pair, several,
+#   negative); measure_mask_at (common prefix and suffix, prefix only, suffix
+#   only, neither, absent line); measure_mask_admits (matches, too short,
+#   wrong prefix, wrong suffix, empty mask refused);
+#   measure_verdict (text noise; text real outside the floor; text real by
+#   content at a floor position; text real by an added line the mask refuses;
+#   text overlapping on an empty mask; text overlapping over the position
+#   cap; binary overlapping; binary real outside the floor; binary real by
+#   size delta; binary real by differing-byte count; identical controls;
+#   unsampled; a unit identical to the control);
+#   measure_cleared_reason (listed, absent, missing file, comment);
+#   measure_evidence (text, binary, unsampled, always printed for noise).
+
+set -o pipefail
+
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $0
+Test bin/layer-compare-lib without building anything
+EOF
+exit 1
+}
+
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then usage; fi
+
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+source "$BT/bin/layer-measure-lib"
+source "$BT/bin/layer-compare-lib"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+assert_eq() {
+    local label=$1 got=$2 want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+assert_ok() {
+    local label=$1
+    shift
+    "$@" >/dev/null 2>&1 || fatal "$label: should have passed"
+}
+
+assert_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
+
+assert_grep() {
+    local label=$1 pattern=$2 haystack=$3
+    grep -q -- "$pattern" <<<"$haystack" || fatal "$label: no '$pattern' in: $haystack"
+}
+
+# not_noise LABEL UNIT CONTROL...
+# What the four attacks below are actually about: whichever of `real` and
+# `overlapping` a case lands on, both fail the run and both print evidence.
+# Asserting one of them exactly would be asserting an accident of how much
+# framing the planted line happened to keep.
+not_noise() {
+    local label=$1
+    shift
+    local got
+    got=$(measure_verdict "$@") || fatal "$label: measure_verdict failed"
+    case "$(cut -f1 <<<"$got")" in
+        real|overlapping) ;;
+        *) fatal "$label: got '$got', wanted real or overlapping" ;;
+    esac
+    printf '%s\n' "$got"
+}
+
+# verdict LABEL WANT UNIT CONTROL...
+verdict() {
+    local label=$1 want=$2
+    shift 2
+    local got
+    got=$(measure_verdict "$@") || fatal "$label: measure_verdict failed"
+    assert_eq "$label" "$(cut -f1 <<<"$got")" "$want"
+    printf '%s\n' "$got"
+}
+
+shadow() { # shadow FILE STAMP ACCOUNT...
+    local f=$1 stamp=$2
+    shift 2
+    { echo "# written $stamp"
+      echo "root:!:20000:0:99999:7:::"
+      local a
+      for a in "$@"; do echo "$a"; done
+    } > "$f"
+}
+
+info "1: measure_is_text"
+printf 'one\ntwo\n' > "$tmp/t"
+printf 'a\0b\n' > "$tmp/nul"
+printf 'no trailing newline and no newline at all' > "$tmp/noeol"
+{ head -c 9000 /dev/zero | tr '\0' 'x'; echo; } > "$tmp/longline"
+assert_ok text-plain measure_is_text "$tmp/t"
+assert_fail text-nul measure_is_text "$tmp/nul"
+assert_fail text-nonewline measure_is_text "$tmp/noeol"
+assert_fail text-longline measure_is_text "$tmp/longline"
+# a NUL-free binary that still carries control bytes is not text, because a
+# binary masked line by line can come out as noise
+printf 'header\x01\x02\x03\nbody\n' > "$tmp/ctrl"
+assert_fail text-controlbytes measure_is_text "$tmp/ctrl"
+# a TYPE=VIEW .frm is ASCII with newlines and really is text; mysql/user.frm
+# is one, and its only difference between builds is a timestamp line
+printf 'TYPE=VIEW\ntimestamp=0001790574106902134\nalgorithm=0\n' > "$tmp/viewfrm"
+assert_ok text-viewfrm measure_is_text "$tmp/viewfrm"
+assert_fail text-missing measure_is_text "$tmp/absent"
+
+info "2: measure_line, measure_common_prefix and measure_common_suffix"
+assert_eq line-1 "$(measure_line 1 "$tmp/t")" one
+assert_eq line-2 "$(measure_line 2 "$tmp/t")" two
+assert_eq line-absent "$(measure_line 9 "$tmp/t")" ""
+assert_eq prefix-some "$(measure_common_prefix "# written 1" "# written 2")" "# written "
+assert_eq prefix-none "$(measure_common_prefix abc xyz)" ""
+assert_eq prefix-whole "$(measure_common_prefix abc abc)" abc
+assert_eq prefix-one "$(measure_common_prefix abc)" abc
+assert_eq prefix-empty "$(measure_common_prefix "" abc)" ""
+assert_eq suffix-some "$(measure_common_suffix "a:!!:20000" "bb:!!:20000")" ":!!:20000"
+assert_eq suffix-none "$(measure_common_suffix abc xyz)" ""
+assert_eq suffix-whole "$(measure_common_suffix abc abc)" abc
+assert_eq suffix-one "$(measure_common_suffix abc)" abc
+
+info "3: measure_text_positions and measure_byte_offsets"
+printf 'one\ntwo\nthree\n' > "$tmp/a"
+printf 'one\nTWO\nthree\n' > "$tmp/b"
+printf 'one\ntwo\nthree\nfour\n' > "$tmp/c"
+printf 'one\nthree\n' > "$tmp/d"
+assert_eq pos-same "$(measure_text_positions "$tmp/a" "$tmp/a")" ""
+assert_eq pos-changed "$(measure_text_positions "$tmp/a" "$tmp/b")" "$(printf 'n2\no2')"
+assert_eq pos-added "$(measure_text_positions "$tmp/a" "$tmp/c")" "n4"
+assert_eq pos-removed "$(measure_text_positions "$tmp/a" "$tmp/d")" "o2"
+printf 'AAAA' > "$tmp/ba"
+printf 'AABA' > "$tmp/bb"
+printf 'AAA' > "$tmp/bc"
+assert_eq off-same "$(measure_byte_offsets "$tmp/ba" "$tmp/ba")" ""
+assert_eq off-one "$(measure_byte_offsets "$tmp/ba" "$tmp/bb")" 3
+assert_eq off-shorter "$(measure_byte_offsets "$tmp/ba" "$tmp/bc")" ""
+assert_fail off-missing measure_byte_offsets "$tmp/ba" "$tmp/absent"
+
+info "4: measure_floor_positions over every control pair"
+shadow "$tmp/c1" 1000 "mysql:!!:1:::"
+shadow "$tmp/c2" 2000 "mysql:!!:1:::"
+shadow "$tmp/c3" 3000 "mysql:!!:1:::"
+assert_eq floor-pair "$(measure_floor_positions text "$tmp/c1" "$tmp/c2")" "$(printf 'n1\no1')"
+assert_eq floor-three "$(measure_floor_positions text "$tmp/c1" "$tmp/c2" "$tmp/c3")" "$(printf 'n1\no1')"
+assert_eq floor-identical "$(measure_floor_positions text "$tmp/c1" "$tmp/c1")" ""
+assert_eq floor-binary "$(measure_floor_positions binary "$tmp/ba" "$tmp/bb")" 3
+
+info "5: measure_range"
+assert_eq range-size "$(measure_range size "$tmp/c1" "$tmp/c2" "$tmp/c3")" "0 0"
+printf '12345' > "$tmp/s5"
+printf '123456' > "$tmp/s6"
+printf '1' > "$tmp/s1"
+assert_eq range-grow "$(measure_range size "$tmp/s5" "$tmp/s6")" "-1 1"
+assert_eq range-both "$(measure_range size "$tmp/s5" "$tmp/s6" "$tmp/s1")" "-5 5"
+assert_eq range-bytes "$(measure_range bytes "$tmp/ba" "$tmp/bb")" "1 1"
+
+info "6: measure_mask_at and measure_mask_admits"
+m=$(measure_mask_at 1 "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_eq mask-prefix "$(cut -d"$(printf '\001')" -f1 <<<"$m")" "# written "
+assert_eq mask-suffix "$(cut -d"$(printf '\001')" -f2 <<<"$m")" "000"
+printf 'aaaZZZ\n' > "$tmp/p1"; printf 'aaaYYY\n' > "$tmp/p2"
+assert_eq mask-prefixonly "$(measure_mask_at 1 "$tmp/p1" "$tmp/p2")" "$(printf 'aaa\001')"
+printf 'ZZZaaa\n' > "$tmp/q1"; printf 'YYYaaa\n' > "$tmp/q2"
+assert_eq mask-suffixonly "$(measure_mask_at 1 "$tmp/q1" "$tmp/q2")" "$(printf '\001aaa')"
+printf 'abc\n' > "$tmp/r1"; printf 'xyz\n' > "$tmp/r2"
+assert_eq mask-neither "$(measure_mask_at 1 "$tmp/r1" "$tmp/r2")" "$(printf '\001')"
+# the free region, the part between the prefix and the suffix, is the part
+# the controls actually vary; admitting a line means admitting what it put
+# there, so the controls have to pin it
+assert_eq free-middle "$(measure_free_region "# written 4000" "# written " "000")" "4"
+assert_eq free-empty "$(measure_free_region "abc" "abc" "")" ""
+assert_eq free-overlap "$(measure_free_region "ab" "abc" "abc")" ""
+assert_ok admits-yes measure_mask_admits "# written 4000" "# written " "000" \
+    "# written 1000" "# written 2000" "# written 3000"
+assert_fail admits-prefix measure_mask_admits "root:x:0" "# written " "" \
+    "# written 1000" "# written 2000"
+assert_fail admits-suffix measure_mask_admits "# written 4242" "# written " "000" \
+    "# written 1000" "# written 2000"
+assert_fail admits-short measure_mask_admits "# wr" "# written " "" \
+    "# written 1000" "# written 2000"
+assert_fail admits-emptymask measure_mask_admits "anything at all" "" "" \
+    "abc" "xyz"
+# a free region of a different length than every control's is not that field
+assert_fail admits-longer measure_mask_admits "# written 40000" "# written " "" \
+    "# written 1000" "# written 2000"
+# a free region carrying anything but a number or a timestamp is not pinned,
+# however well the line's framing matches
+assert_fail admits-class measure_mask_admits "# written abcd" "# written " "" \
+    "# written 1000" "# written 2000"
+# controls that agree at a line establish no varying shape at all
+assert_fail admits-noshape measure_mask_admits "# written 4000" "# written 1000" "" \
+    "# written 1000" "# written 1000"
+# a unit line one of the controls produced is NOT admitted for being
+# observed: a generated secret is safe because it is different every build,
+# so matching a control is evidence of pinning, not of freshness. It is
+# admitted here only because a one digit decimal is pinned by length and
+# class like any other
+assert_ok admits-pinned-digit measure_mask_admits "# written 2000" "# written " "000" \
+    "# written 1000" "# written 2000"
+assert_fail admits-replay measure_mask_admits "k=AAAABBBBCCCC" "k=" "" \
+    "k=AAAABBBBCCCC" "k=DDDDEEEEFFFF"
+# and a free region longer than the cap is never pinned
+long=$(head -c 40 /dev/zero | tr '\0' '7')
+assert_fail admits-toolong measure_mask_admits "t=$long" "t=" "" "t=1111111111" "t=2222222222"
+
+# ---------------------------------------------------------------------------
+# the verdicts, and the four false negatives that made this rewrite necessary
+# ---------------------------------------------------------------------------
+
+info "7: a clock that moves in every build is noise"
+shadow "$tmp/u-clock" 4000 "mysql:!!:1:::"
+v=$(verdict clock noise "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_grep clock-why "mask" "$v"
+
+info "8: an account added where the control pair also appends is NOT noise"
+# the control pair appends a different account at the same line number, so
+# the position cancels; only the content tells them apart
+shadow "$tmp/ac1" 1000 "mysql:!!:1:::" "alice:!!:20000:0:99999:7:::"
+shadow "$tmp/ac2" 2000 "mysql:!!:1:::" "bob:!!:20000:0:99999:7:::"
+# shellcheck disable=SC2016  # a literal crypt hash, not an expansion
+shadow "$tmp/au"  3000 "mysql:!!:1:::" 'mallory:$y$REALPASSWORDHASH:20000:::'
+v=$(verdict added-account real "$tmp/au" "$tmp/ac1" "$tmp/ac2")
+assert_grep added-account-why "line 4" "$v"
+
+info "9: a root password set on the line the floor rewrites is NOT noise"
+printf '# written 1000\nroot:!:20000:0:99999:7:::\n' > "$tmp/rc1"
+printf '# written 2000\nroot:!:20000:0:99999:7:::\n' > "$tmp/rc2"
+# shellcheck disable=SC2016  # a literal crypt hash, not an expansion
+printf 'root:$y$REALHASH:20000:0:99999:7:::\nroot:!:20000:0:99999:7:::\n' > "$tmp/ru"
+verdict root-password real "$tmp/ru" "$tmp/rc1" "$tmp/rc2" >/dev/null
+
+info "10: a binary coinciding with the floor is overlapping, never noise"
+bin() { printf 'HDR\0%s\0%s' "$2" "$3" > "$1"; }
+bin "$tmp/kc1" AAAAAAAA root@localhost
+bin "$tmp/kc2" BBBBBBBB root@localhost
+bin "$tmp/ku"  CCCCCCCC root@localhost
+v=$(verdict binary-coincide overlapping "$tmp/ku" "$tmp/kc1" "$tmp/kc2")
+assert_grep binary-why "byte" "$v"
+bin "$tmp/ku2" AAAAAAAA root@localhosX
+verdict binary-outside real "$tmp/ku2" "$tmp/kc1" "$tmp/kc2" >/dev/null
+# every control pair differs at the same eight bytes, so a unit differing at
+# only four of them is inside the floor by position and outside it by
+# magnitude, which is the only handle a binary offers
+bin "$tmp/kc3" CCCCCCCC root@localhost
+bin "$tmp/ku3" AAAADDDD root@localhost
+v=$(verdict binary-count real "$tmp/ku3" "$tmp/kc1" "$tmp/kc2" "$tmp/kc3")
+assert_grep binary-count-why "bytes differ where the controls" "$v"
+
+info "11: a length change the floor does not show is NOT noise"
+head -c 4096 /dev/zero | tr '\0' 'x' > "$tmp/lc1"
+{ head -c 4096 /dev/zero | tr '\0' 'x'; printf 'y'; } > "$tmp/lc2"
+head -c 512 /dev/zero | tr '\0' 'x' > "$tmp/lu"
+v=$(verdict length-outside real "$tmp/lu" "$tmp/lc1" "$tmp/lc2")
+assert_grep length-why "size" "$v"
+
+info "12: a mask that explains nothing never yields noise"
+printf 'abc\n' > "$tmp/ec1"; printf 'xyz\n' > "$tmp/ec2"; printf 'pqr\n' > "$tmp/eu"
+verdict empty-mask overlapping "$tmp/eu" "$tmp/ec1" "$tmp/ec2" >/dev/null
+# the NUL-free, newline-free blob that used to collapse to one line
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/bl1"
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/bl2"
+head -c 1500 /dev/urandom | tr -d '\0\n' > "$tmp/blu"
+v=$(measure_verdict "$tmp/blu" "$tmp/bl1" "$tmp/bl2")
+[[ "$(cut -f1 <<<"$v")" != noise ]] || fatal "blob: a newline-free blob came back as noise"
+
+info "13: identical controls leave no floor, so any difference is real"
+verdict no-floor real "$tmp/u-clock" "$tmp/c1" "$tmp/c1" >/dev/null
+
+info "14: a unit identical to the control has nothing to report"
+v=$(verdict identical none "$tmp/c1" "$tmp/c1" "$tmp/c2")
+assert_grep identical-why "identical" "$v"
+
+info "15: unsampled"
+verdict unsampled-unit unsampled "$tmp/absent" "$tmp/c1" "$tmp/c2" >/dev/null
+verdict unsampled-control unsampled "$tmp/c1" "$tmp/absent" "$tmp/c2" >/dev/null
+assert_fail verdict-nocontrol measure_verdict "$tmp/c1"
+
+info "16: too many differing positions to mask"
+saved=$MEASURE_POSITION_MAX
+MEASURE_POSITION_MAX=2
+seq 1 20 | sed 's/$/ a/' > "$tmp/mc1"
+seq 1 20 | sed 's/$/ b/' > "$tmp/mc2"
+seq 1 20 | sed 's/$/ c/' > "$tmp/mu"
+v=$(verdict position-cap overlapping "$tmp/mu" "$tmp/mc1" "$tmp/mc2")
+assert_grep position-cap-why "too many" "$v"
+MEASURE_POSITION_MAX=$saved
+
+info "16b: a binary too different to compare offset by offset"
+saved_off=$MEASURE_OFFSET_MAX
+MEASURE_OFFSET_MAX=4
+head -c 64 /dev/urandom > "$tmp/big1"
+head -c 64 /dev/urandom > "$tmp/big2"
+head -c 64 /dev/urandom > "$tmp/bigu"
+v=$(verdict offset-cap overlapping "$tmp/bigu" "$tmp/big1" "$tmp/big2")
+assert_grep offset-cap-why "too many to compare" "$v"
+assert_ok truncated-yes measure_offsets_truncated "$tmp/big1" "$tmp/big2"
+MEASURE_OFFSET_MAX=$saved_off
+assert_fail truncated-no measure_offsets_truncated "$tmp/ba" "$tmp/bb"
+
+info "16c: the four ways a two-ended mask was made to admit a constant"
+# each of these was reported as noise by the mask that constrained only the
+# prefix and the suffix, with a real secret in the free region
+key3() { printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s root@keel\n' "$1" > "$2"; }
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k1"
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k2"
+key3 "$(head -c 32 /dev/urandom | base64 | tr -d '=\n' | head -c 30)" "$tmp/k3"
+key3 "HARDCODEDKEYTHATTHEUNITSHIPSXX" "$tmp/kunit"
+not_noise attack-sshkey "$tmp/kunit" "$tmp/k1" "$tmp/k2" "$tmp/k3" >/dev/null
+# shellcheck disable=SC2016  # a literal crypt prefix, not an expansion
+hash3() { printf 'root:$y$j9T$%s:20000:0:99999:7:::\n' "$1" > "$2"; }
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h1"
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h2"
+hash3 "$(head -c 16 /dev/urandom | base64 | tr -d '=\n' | head -c 20)" "$tmp/h3"
+hash3 "BAKEDINPASSWORDHASHX" "$tmp/hunit"
+not_noise attack-shadow "$tmp/hunit" "$tmp/h1" "$tmp/h2" "$tmp/h3" >/dev/null
+for n in 1 2 3; do printf '# written 179047500%s by build\n' "$n" > "$tmp/w$n"; done
+printf '# written 1790475 GRANT ALL ON *.* TO evil by build\n' > "$tmp/wunit"
+not_noise attack-planted "$tmp/wunit" "$tmp/w1" "$tmp/w2" "$tmp/w3" >/dev/null
+for n in 1 2 3; do printf 'token=%s\n' "$n$n$n$n" > "$tmp/g$n"; done
+printf 'token=%s\n' "$(head -c 400 /dev/zero | tr '\0' 'A')" > "$tmp/gunit"
+not_noise attack-grown "$tmp/gunit" "$tmp/g1" "$tmp/g2" "$tmp/g3" >/dev/null
+# the payload planted on the real mysql/user.frm of the gate run
+for n in 1 2 3; do printf 'TYPE=VIEW\ntimestamp=000179057410690213%s\n' "$n" > "$tmp/v$n"; done
+printf 'TYPE=VIEW\ntimestamp=0001790574 OR 1=1; GRANT ALL ON *.* TO evil@localhost\n' > "$tmp/vunit"
+not_noise attack-userfrm "$tmp/vunit" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
+# and the clock those four were hiding behind is still noise
+printf 'TYPE=VIEW\ntimestamp=0001790574106902139\n' > "$tmp/vclock"
+verdict clock-still-noise noise "$tmp/vclock" "$tmp/v1" "$tmp/v2" "$tmp/v3" >/dev/null
+
+info "16c2: a value copied from a control is a replay, not freshness"
+# docs/traps.md, "Every appliance built from core has the same machine-id":
+# a generated value baked into a layer is a defect, not a licence. The unit
+# ships, byte for byte, what the second or third control produced, which
+# differs from the base capture and so reaches the mask
+replay() { printf '%s\n' "$2" > "$1"; }
+replay "$tmp/rk1" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMONEEEEEEEEEEE root@keel"
+replay "$tmp/rk2" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMTWOOOOOOOOOOO root@keel"
+replay "$tmp/rk3" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMTHREEEEEEEEEE root@keel"
+cp "$tmp/rk2" "$tmp/rkunit"
+not_noise replay-hostkey "$tmp/rkunit" "$tmp/rk1" "$tmp/rk2" "$tmp/rk3" >/dev/null
+replay "$tmp/rm1" "1f0c1d4a6b7e4f0a9c2d3e4f5a6b7c8d"
+replay "$tmp/rm2" "2a1b2c3d4e5f60718293a4b5c6d7e8f9"
+replay "$tmp/rm3" "3b2c3d4e5f60718293a4b5c6d7e8f9a0"
+cp "$tmp/rm3" "$tmp/rmunit"
+not_noise replay-machineid "$tmp/rmunit" "$tmp/rm1" "$tmp/rm2" "$tmp/rm3" >/dev/null
+# shellcheck disable=SC2016  # literal crypt prefixes, not expansions
+i=0
+for h in Kq7xPnZa2WdLbTvE Rm3JcYs8HgUpNfXo Zt9BwQe4VkAiDrLs; do
+    i=$((i + 1))
+    # shellcheck disable=SC2016  # a literal crypt prefix, not an expansion
+    printf 'root:$y$j9T$%s:20000:0:99999:7:::\n' "$h" > "$tmp/rs$i"
+done
+cp "$tmp/rs2" "$tmp/rsunit"
+not_noise replay-shadow "$tmp/rsunit" "$tmp/rs1" "$tmp/rs2" "$tmp/rs3" >/dev/null
+# and a fresh random value at the same path is flagged too, so the safe case
+# is no longer the only one that is
+replay "$tmp/rkfresh" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRANDOMFOURRRRRRRRRR root@keel"
+not_noise fresh-hostkey "$tmp/rkfresh" "$tmp/rk1" "$tmp/rk2" "$tmp/rk3" >/dev/null
+
+info "16d: the verdict does not depend on where the builds fell"
+# the review's point: the user.frm mask was 21 characters of prefix only
+# because four builds landed inside the same thousand seconds, and a
+# criterion whose answer depends on the hour the gate ran is not a
+# criterion. Across a digit carry the prefix collapses to 9 characters; the
+# clock must still be noise and the payload must still not be
+for v in 0001790574999999999 0001790575000000001 0001790575000000009; do
+    printf 'TYPE=VIEW\ntimestamp=%s\n' "$v" > "$tmp/carry-$v"
+done
+printf 'TYPE=VIEW\ntimestamp=0001790575000000123\n' > "$tmp/carry-clock"
+printf 'TYPE=VIEW\ntimestamp=0001790574 OR 1=1; GRANT ALL ON *.* TO evil\n' > "$tmp/carry-payload"
+assert_eq carry-prefix \
+    "$(measure_common_prefix 0001790574999999999 0001790575000000001 0001790575000000009)" \
+    "000179057"
+verdict carry-clock noise "$tmp/carry-clock" "$tmp/carry-0001790574999999999" \
+    "$tmp/carry-0001790575000000001" "$tmp/carry-0001790575000000009" >/dev/null
+not_noise carry-payload "$tmp/carry-payload" "$tmp/carry-0001790574999999999" \
+    "$tmp/carry-0001790575000000001" "$tmp/carry-0001790575000000009" >/dev/null
+
+info "17: the waiver file"
+# the list a capture carries, which is what licenses a glob rule's directory
+statelist=$(printf '%s\n' './etc/shadow' './etc/ssh/ssh_host_*' \
+    './etc/ssl/private/**' './var/lib/mysql/**' './var/lib/postgresql/**' \
+    './home/**/.ssh/**')
+cat > "$tmp/cleared" <<'EOF'
+# rule, count, max-position, justified-against, reason
+./var/lib/mysql/ibdata1	1	600	captures at /m/gate, recipe 659eeb4	InnoDB creation stamps, checked by hand on 2026-09-28
+./var/lib/postgresql/**	6	4096	captures at /m/gate, recipe 659eeb4	initdb output, read on 2026-09-28
+EOF
+assert_ok waiver-ok measure_waiver_check "$tmp/cleared" 0 "$statelist"
+assert_ok waiver-nofile measure_waiver_check "$tmp/absent"
+assert_eq waiver-rules "$(measure_waiver_rules "$tmp/cleared" | wc -l)" 2
+rule=$(measure_cleared_rule "$tmp/cleared" ./var/lib/mysql/ibdata1 600)
+assert_eq cleared-hit "$(measure_cleared_reason "$rule")" \
+    "InnoDB creation stamps, checked by hand on 2026-09-28"
+# a rule justified only as far as offset 600 does not cover a difference at 601
+assert_eq cleared-beyond "$(measure_cleared_rule "$tmp/cleared" ./var/lib/mysql/ibdata1 601)" ""
+assert_eq cleared-miss "$(measure_cleared_rule "$tmp/cleared" ./etc/shadow 1)" ""
+assert_eq cleared-nofile "$(measure_cleared_rule "$tmp/absent" ./etc/shadow 1)" ""
+# a glob covers a subtree, because a data directory is many files and one
+# sentence, and the report names every path it covered
+assert_grep cleared-glob "initdb output" \
+    "$(measure_cleared_reason "$(measure_cleared_rule "$tmp/cleared" ./var/lib/postgresql/17/main/PG_VERSION 10)")"
+# a glob is an exact path or a named directory and its subtree, and nothing
+# else: counting literal characters said ./etc/ss* was specific enough to
+# waive an SSH host key and a TLS private key under one sentence
+# a glob rule's directory has to be one the state path list itself declares,
+# or below one. Counting components said ./var/lib was specific enough, and
+# ./var/lib is the common parent of six subtrees the list declares separately,
+# so one sentence about MariaDB accounts could clear PostgreSQL state.
+assert_eq state-dirs "$(measure_state_dirs "$statelist" | paste -sd, -)" \
+    "./etc/ssh,./etc/ssl/private,./home/**/.ssh,./var/lib/mysql,./var/lib/postgresql"
+# a malformed entry with no slash in it declares nothing: without this guard
+# ${glob%/*} would hand back the entry itself as a directory
+assert_eq state-dirs-noslash "$(measure_state_dirs "$(printf 'shadow*\n./var/lib/mysql/**')")" \
+    "./var/lib/mysql"
+assert_eq state-dirs-none "$(measure_state_dirs "$(printf './etc/shadow\n./etc/group')")" ""
+# a declaration with a wildcard in a non-final component licenses nothing,
+# because the comparison is literal. It fails closed on purpose: an exact
+# path waiver is the route for those, and a glob comparison here would put
+# the breadth ambiguity back
+assert_fail below-wildcard-decl measure_dir_at_or_below ./home/alice/.ssh './home/**/.ssh'
+assert_ok below-same measure_dir_at_or_below ./var/lib/mysql ./var/lib/mysql
+assert_ok below-deeper measure_dir_at_or_below ./var/lib/mysql/mysql ./var/lib/mysql
+assert_fail below-above measure_dir_at_or_below ./var/lib ./var/lib/mysql
+assert_fail below-sibling measure_dir_at_or_below ./var/lib/mysqlx ./var/lib/mysql
+for bad in '*' './etc/*' './etc/ss*' './var/lib/*' './var/lib/my*/**' './etc/**' './**' \
+        './var/lib/mysql/*.MAD' './var/lib/**' './var/**' './etc/ssl/**' \
+        './var/cache/**' './usr/share/**' './etc/webmin/**'; do
+    printf '%s\t1\t1\tnowhere\ttoo broad or not declared state\n' "$bad" > "$tmp/broad"
+    assert_fail "waiver-broad-$bad" measure_waiver_check "$tmp/broad" 0 "$statelist"
+done
+for good in './var/lib/mysql/**' './var/lib/mysql/mysql/**' './etc/ssh/**' \
+        './etc/ssl/private/**' './var/lib/mysql/mysql/global_priv.MAD' \
+        './some/path/nobody/declared'; do
+    printf '%s\t1\t1\tnowhere\ta declared subtree or an exact path\n' "$good" > "$tmp/ok"
+    assert_ok "waiver-ok-$good" measure_waiver_check "$tmp/ok" 0 "$statelist"
+done
+printf './var/lib/mysql/**\ttwo fields\n' > "$tmp/short"
+assert_fail waiver-fields measure_waiver_check "$tmp/short" 0 "$statelist"
+printf './var/lib/mysql/**\tmany\t1\tnowhere\tcount is not a number\n' > "$tmp/nan"
+assert_fail waiver-nan measure_waiver_check "$tmp/nan" 0 "$statelist"
+printf './var/lib/mysql/**\t1\t1\t\t\n' > "$tmp/nojust"
+assert_fail waiver-nojust measure_waiver_check "$tmp/nojust" 0 "$statelist"
+
+assert_eq free-summary-none "$(measure_free_summary "abc" "abc" "")" "nothing"
+assert_grep free-summary-num "a number or a timestamp" \
+    "$(measure_free_summary "t=4000" "t=" "")"
+assert_grep free-summary-not "not a number" \
+    "$(measure_free_summary "t=abcd" "t=" "")"
+
+# the shape helpers, and the cap check the executable passes a cap to
+assert_eq prefix-subtree "$(measure_waiver_prefix './var/lib/mysql/**')" "./var/lib/mysql"
+assert_eq prefix-exact "$(measure_waiver_prefix ./var/lib/mysql/ibdata1)" ""
+printf './var/lib/mysql/**\t1\t16777216\there\tthe sample cap bounds nothing\n' > "$tmp/capmax"
+assert_ok capmax-nocap measure_waiver_check "$tmp/capmax" 0 "$statelist"
+assert_fail capmax-withcap measure_waiver_check "$tmp/capmax" 16777216 "$statelist"
+assert_ok capmax-under measure_waiver_check "$tmp/capmax" 16777217 "$statelist"
+
+info "17a: the list a capture carries is anchored to the committed one"
+printf './etc/shadow\n./var/lib/mysql/**\n' > "$tmp/committed"
+mkdir -p "$tmp/cap-ok" "$tmp/cap-wide"
+cp "$tmp/committed" "$tmp/cap-ok/state-paths.txt"
+printf './etc/shadow\n./var/lib/mysql/**\n./var/lib/**\n' > "$tmp/cap-wide/state-paths.txt"
+assert_ok anchored-same measure_list_anchored "$tmp/cap-ok" "$tmp/committed"
+assert_fail anchored-wide measure_list_anchored "$tmp/cap-wide" "$tmp/committed"
+assert_fail anchored-nocommitted measure_list_anchored "$tmp/cap-ok" "$tmp/absent"
+assert_fail anchored-nocapture measure_list_anchored "$tmp/absent" "$tmp/committed"
+
+info "17b: measure_max_position"
+assert_eq maxpos-text "$(measure_max_position "$tmp/c2" "$tmp/c1")" 1
+assert_eq maxpos-binary "$(measure_max_position "$tmp/bb" "$tmp/ba")" 3
+
+info "18: measure_evidence is printed for every verdict, noise included"
+e=$(measure_evidence ./etc/shadow "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_grep evidence-noise-unit "control vs unit" "$e"
+assert_grep evidence-noise-floor "control vs control" "$e"
+assert_grep evidence-noise-content "written" "$e"
+e=$(measure_evidence ./k "$tmp/ku" "$tmp/kc1" "$tmp/kc2")
+assert_grep evidence-binary "offset" "$e"
+assert_grep evidence-binary-size "size" "$e"
+# the bytes themselves, in capture order, which is what tells a clock that
+# climbs with capture time apart from a change only the unit has
+assert_grep evidence-window "in capture order" "$e"
+assert_grep evidence-window-unit "unit " "$e"
+assert_eq evidence-window-rows \
+    "$(grep -cE '^        (control|unit) ' <<<"$e")" 3
+# a text path gets no byte window, because its diff already shows the content
+e=$(measure_evidence ./etc/shadow "$tmp/u-clock" "$tmp/c1" "$tmp/c2" "$tmp/c3")
+assert_eq evidence-window-text "$(grep -c 'in capture order' <<<"$e")" 0
+e=$(measure_evidence ./x "$tmp/absent" "$tmp/c1" "$tmp/c2")
+assert_grep evidence-unsampled "not sampled" "$e"
+
+echo
+info "all tests passed"

@@ -1,0 +1,42 @@
+# A waiver file. It lives in the repository beside the component it is about,
+# and bt-layer-measure attribute prints its digest and every rule below, with
+# every path each rule covered and that path's bytes.
+#
+# A waiver clears `overlapping`, which is a difference that coincides with
+# what the control builds vary but cannot be shown to be that variation. It
+# can never clear `real`, and it is not a route to PASS on its own: a `real`
+# path stays `real` and the run stays FAIL. It is the one place a person
+# overrides the instrument, so it has to say what was read and what it was
+# found to be.
+#
+# Five tab separated fields:
+#
+#   rule               an exact path, or a named directory and its whole
+#                      subtree written DIR/**. Nothing else: a glob that can
+#                      reach a second subtree is refused, and so is one that
+#                      names fewer than two components below ./, because
+#                      ./etc/ss* covers an SSH host key and a TLS private
+#                      key under one sentence. One rule per subtree.
+#   count              how many `overlapping` paths it covered in the run it
+#                      was written against, read off that run's own block
+#                      and not estimated. A run where it covers a different
+#                      number fails, so a new file appearing in a waived
+#                      directory cannot be swept in silently.
+#   max-position       the largest position actually reported for those
+#                      paths: a line number for a text file, a byte offset
+#                      for a binary. NEVER the sample cap, which is past the
+#                      end of anything and so bounds nothing; a value at or
+#                      past it is refused. One rule per file shape, because
+#                      one number cannot bound two of them.
+#   justified-against  the capture directory this was read against, and the
+#                      recipe commit. The directory is compared with --dir
+#                      and the run fails if it does not match, so a waiver
+#                      cannot outlive its evidence.
+#   reason             what was read, and what it was found to be.
+#
+# The numbers below are from one particular run and are examples, not values
+# to copy: take yours from your own block.
+#
+# rule	count	max-position	justified-against	reason
+./var/lib/mysql/mysql/global_priv.MAD	1	16384	/mnt/builds/measure/mariadb-gate, recipe 659eeb4	Aria data page header timestamps. The six accounts and their authentication_string values are identical in all four captures; only password_last_changed moves, 1790574121 to 1790574610, climbing with capture time. Read 2026-09-28.
+./var/lib/mysql/mysql/global_priv.frm	1	76	/mnt/builds/measure/mariadb-gate, recipe 659eeb4	.frm create and update timestamps at fixed offsets 67-76, the same offsets every control pair moves. Read 2026-09-28.
