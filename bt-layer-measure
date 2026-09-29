@@ -257,6 +257,7 @@ do_attribute() {
         || die "$EXIT_INPUT" "the captures cannot be compared"
     MEASURE_COMMITTED_LIST=$(committed_paths_file)
     if ! measure_list_anchored "$MEASURE_DIR/$MEASURE_CONTROL" "$MEASURE_COMMITTED_LIST"; then
+        MEASURE_LIST_DIVERGES=1
         if [[ -z "$MEASURE_LIST_OVERRIDE" ]]; then
             die "$EXIT_INPUT" "the captures were taken against a state path list that is not $MEASURE_COMMITTED_LIST; that list decides both which bytes were kept and which waiver rules are legal, so a run against another one has to say so with --state-paths-override REASON, which the block then prints"
         fi

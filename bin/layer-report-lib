@@ -40,6 +40,9 @@ MEASURE_SUSPECT_COUNT=0
 # state_paths_sha256 was about.
 MEASURE_COMMITTED_LIST=
 MEASURE_LIST_OVERRIDE=
+# Non-empty when the anchor check found the captures' list is not the
+# committed one, which is the only case the OVERRIDE line may assert.
+MEASURE_LIST_DIVERGES=
 
 # ---------------------------------------------------------------------------
 # printing helpers
@@ -262,8 +265,14 @@ measure_attribute_report() {
         printf 'committed     %s (sha256 %s)\n' "$MEASURE_COMMITTED_LIST" \
             "$(sha256sum < "$MEASURE_COMMITTED_LIST" | cut -c1-16)"
     fi
-    if [[ -n "$MEASURE_LIST_OVERRIDE" ]]; then
+    # OVERRIDE asserts a mismatch, so it is printed only when the anchor
+    # check found one; a reason given on captures that do carry the
+    # committed list is still printed, as what it is
+    if [[ -n "$MEASURE_LIST_DIVERGES" ]]; then
         printf 'OVERRIDE      the captures were taken against a list that is not the committed one, declared: %s\n' \
+            "$MEASURE_LIST_OVERRIDE"
+    elif [[ -n "$MEASURE_LIST_OVERRIDE" ]]; then
+        printf 'override      declared and not needed, the captures carry the committed list: %s\n' \
             "$MEASURE_LIST_OVERRIDE"
     fi
     printf 'unit          %s\n' "$(measure_describe "$dir" "$unit")"
