@@ -1,0 +1,24 @@
+# Private keys layer_audit_keys (bin/layer-lib) lets into a layer: inert
+# examples and test fixtures that packages ship, which no service reads and
+# which are published with their package anyway. One "sha256 /path" per line.
+#
+# A key is listed here only after a person has read it and said why it is
+# inert, and it is accepted only at this path with this digest: a package
+# update that changes one fails the layer build until someone looks again.
+# Anything a service could use belongs in removelists-final, never here
+# (keel-core#8).
+#
+# Measured on the layer trees of 2026-09-26 to 2026-09-28 on the build host,
+# with the pattern layer_audit_keys uses.
+
+# libnet-ssleay-perl: the server key of the documentation examples
+0e13f274a94db44c94ced16b2332fdbc9ff770eae88bdec9c0347695c7c99ee2 /usr/share/doc/libnet-ssleay-perl/examples/server_key.pem
+
+# libio-socket-ssl-perl: a documentation example that embeds a demo CA key
+bf6fcca47a4b4245420813689304921ebd89e630a8b2a701e6c42f5e04a73e27 /usr/share/doc/libio-socket-ssl-perl/examples/simulate_proxy.pl
+
+# tklbam: the vendored pycryptodome self test, DSA import vectors
+d9a5613097b67f8a4d22d08366ca7adc805dc1fc6a8f3042400e1ac6fa9685e8 /usr/lib/tklbam/deps/lib/Crypto/SelfTest/PublicKey/test_import_DSA.py
+
+# nodebb: the test fixture of the secure-keys npm module
+f39853215468752ae2033de8bd39f4934816d0a52ed33dc5317896e5a7f998c0 /var/www/nodebb/node_modules/secure-keys/test/test.secret.key

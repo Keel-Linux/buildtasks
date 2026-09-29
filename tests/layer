@@ -24,7 +24,13 @@
 #     layer_manifest_opt (present, absent, missing file);
 #     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
 #     layer_audit_packages (clean, unconfigured package);
-#     layer_check_build (ok, no stamp, not mounted, no upper);
+#     layer_audit_keys (clean, no list, no root, a PKCS#8 key named by its
+#     image path, a key after a certificate, two OpenSSH and EC keys both
+#     named, a quoted marker, a binary, a symlink out of the tree, an example
+#     unlisted, listed, its digest elsewhere, its path with another digest,
+#     grep failing, grep missing, the committed list well formed);
+#     layer_check_build (ok, no stamp, not mounted, no upper, a private key,
+#     no key list);
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
 #     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
 #     layer_parse_args (help, name, parent, use-existing, no name, two
@@ -119,6 +125,7 @@ build/stamps/root.patched:
 	printf '#!/bin/sh\\n' > build/root.patched/bin/bash
 	chmod 755 build/root.patched/bin/bash
 	echo hostname > build/root.patched/etc/hostname
+	if [ -f LEAK ]; then mkdir -p build/root.patched/etc/ssh && cp LEAK build/root.patched/etc/ssh/ssh_host_rsa_key; fi
 	echo lib > build/.deck/root.build/upper/usr/lib/x.so
 	echo deb > build/.deck/root.build/upper/var/cache/apt/archives/x.deb
 	echo bin > build/.deck/root.build/upper/var/cache/apt/pkgcache.bin
@@ -388,19 +395,83 @@ Status: unknown ok not-installed
 STATUS
 expect_ok audit-unknown-ignored layer_audit_packages "$audit_root"
 
+info "10c: layer_audit_keys"
+keys_root=$tmp/keysfs
+keys_list=$tmp/inert-keys
+mkdir -p "$keys_root/etc/ssl/private" "$keys_root/etc/ssh" "$keys_root/usr/share/doc/ex" "$keys_root/usr/bin"
+printf 'hostname\n' > "$keys_root/etc/hostname"
+printf '# comment only\n\n' > "$keys_list"
+expect_ok keys-clean layer_audit_keys "$keys_root" "$keys_list"
+expect_fail keys-no-list layer_audit_keys "$keys_root" "$tmp/no-such-list"
+expect_fail keys-no-root layer_audit_keys "$tmp/no-such-root" "$keys_list"
+# a key on its own, the way turnkey-ssl ships /etc/ssl/private/cert.key
+printf -- '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n' \
+    > "$keys_root/etc/ssl/private/cert.key"
+expect_fail keys-pkcs8 layer_audit_keys "$keys_root" "$keys_list"
+out=$(layer_audit_keys "$keys_root" "$keys_list" 2>&1) || true
+[[ "$out" == *"/etc/ssl/private/cert.key"* ]] || fatal "keys-pkcs8: path not named: $out"
+[[ "$out" != *"$keys_root/etc"* ]] || fatal "keys-pkcs8: names the build tree, not the image path: $out"
+rm "$keys_root/etc/ssl/private/cert.key"
+# a key after a certificate in one file, the way cert.pem combines them
+printf -- '-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n' \
+    > "$keys_root/etc/ssl/private/cert.pem"
+expect_fail keys-combined layer_audit_keys "$keys_root" "$keys_list"
+rm "$keys_root/etc/ssl/private/cert.pem"
+# an OpenSSH host key, and every offender named, not only the first
+printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n' \
+    > "$keys_root/etc/ssh/ssh_host_ed25519_key"
+printf -- '-----BEGIN EC PRIVATE KEY-----\nMHc\n-----END EC PRIVATE KEY-----\n' \
+    > "$keys_root/etc/ssh/ssh_host_ecdsa_key"
+out=$(layer_audit_keys "$keys_root" "$keys_list" 2>&1) && fatal "keys-openssh: should have failed"
+[[ "$out" == *"/etc/ssh/ssh_host_ed25519_key"* ]] || fatal "keys-openssh: ed25519 not named: $out"
+[[ "$out" == *"/etc/ssh/ssh_host_ecdsa_key"* ]] || fatal "keys-openssh: ecdsa not named: $out"
+rm "$keys_root/etc/ssh/ssh_host_ed25519_key" "$keys_root/etc/ssh/ssh_host_ecdsa_key"
+# the marker quoted inside a line is not a key file
+printf 'marker = "-----BEGIN PRIVATE KEY-----"\n' > "$keys_root/usr/share/doc/ex/parser.py"
+expect_ok keys-quoted layer_audit_keys "$keys_root" "$keys_list"
+# a binary that carries the marker as a string, the way ssh-keygen does
+printf 'ELF\0\0\n-----BEGIN OPENSSH PRIVATE KEY-----\n\0' > "$keys_root/usr/bin/ssh-keygen"
+expect_ok keys-binary layer_audit_keys "$keys_root" "$keys_list"
+# a symlink is not followed out of the tree
+printf -- '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n' > "$tmp/outside.key"
+ln -s "$tmp/outside.key" "$keys_root/etc/ssl/private/link.key"
+expect_ok keys-symlink layer_audit_keys "$keys_root" "$keys_list"
+rm "$keys_root/etc/ssl/private/link.key"
+# an inert example is accepted at its path and digest, and nowhere else
+printf -- '-----BEGIN RSA PRIVATE KEY-----\nexample\n-----END RSA PRIVATE KEY-----\n' \
+    > "$keys_root/usr/share/doc/ex/server_key.pem"
+expect_fail keys-example-unlisted layer_audit_keys "$keys_root" "$keys_list"
+example_sha=$(sha256sum "$keys_root/usr/share/doc/ex/server_key.pem" | cut -d ' ' -f 1)
+printf '# an example\n%s  /usr/share/doc/ex/server_key.pem\n' "$example_sha" >> "$keys_list"
+expect_ok keys-example-listed layer_audit_keys "$keys_root" "$keys_list"
+cp "$keys_root/usr/share/doc/ex/server_key.pem" "$keys_root/etc/ssl/private/copy.key"
+expect_fail keys-listed-digest-elsewhere layer_audit_keys "$keys_root" "$keys_list"
+rm "$keys_root/etc/ssl/private/copy.key"
+printf 'changed\n' >> "$keys_root/usr/share/doc/ex/server_key.pem"
+expect_fail keys-listed-path-other-digest layer_audit_keys "$keys_root" "$keys_list"
+rm "$keys_root/usr/share/doc/ex/server_key.pem"
+# a scan that fails is not a clean scan
+printf '#!/bin/bash\nexit 2\n' > "$tmp/grep-broken"
+chmod 755 "$tmp/grep-broken"
+LAYER_GREP=$tmp/grep-broken expect_fail keys-grep-error layer_audit_keys "$keys_root" "$keys_list"
+LAYER_GREP=$tmp/no-such-grep expect_fail keys-no-grep layer_audit_keys "$keys_root" "$keys_list"
+# the committed list parses and names only absolute paths with a digest
+awk '!/^[[:space:]]*(#|$)/ && !($1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^\// && NF == 2) { bad = 1; print "bad line: " $0 } END { exit bad }' \
+    "$BT/conf/layer-inert-keys" || fatal "conf/layer-inert-keys has a malformed line"
+
 info "11: layer_check_build"
 build=$tmp/build
-expect_fail check-nostamp layer_check_build rootfs "$build"
+expect_fail check-nostamp layer_check_build rootfs "$build" "$keys_list"
 mkdir -p "$build/stamps" "$build/root.patched"
 touch "$build/stamps/root.patched"
-expect_fail check-unmounted layer_check_build rootfs "$build"
+expect_fail check-unmounted layer_check_build rootfs "$build" "$keys_list"
 mkdir -p "$build/root.patched/bin"
 touch "$build/root.patched/bin/bash"
 chmod 755 "$build/root.patched/bin/bash"
-layer_check_build rootfs "$build"
-expect_fail check-noupper layer_check_build delta "$build"
+layer_check_build rootfs "$build" "$keys_list"
+expect_fail check-noupper layer_check_build delta "$build" "$keys_list"
 mkdir -p "$build/.deck/root.build/upper" "$build/.deck/root.patched/upper"
-layer_check_build delta "$build"
+layer_check_build delta "$build" "$keys_list"
 mkdir -p "$build/root.patched/var/lib/dpkg"
 cat > "$build/root.patched/var/lib/dpkg/status" << 'STATUS'
 Package: confconsole
@@ -408,8 +479,15 @@ Status: install ok unpacked
 Version: 2.2.3+keel1
 
 STATUS
-expect_fail check-unconfigured layer_check_build delta "$build"
+expect_fail check-unconfigured layer_check_build delta "$build" "$keys_list"
 rm -f "$build/root.patched/var/lib/dpkg/status"
+mkdir -p "$build/root.patched/etc/ssh"
+printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n' \
+    > "$build/root.patched/etc/ssh/ssh_host_ed25519_key"
+expect_fail check-private-key layer_check_build delta "$build" "$keys_list"
+rm -f "$build/root.patched/etc/ssh/ssh_host_ed25519_key"
+expect_fail check-no-key-list layer_check_build delta "$build"
+layer_check_build delta "$build" "$keys_list"
 
 info "12: layer_hash_size and layer_write_sha256"
 echo foo > "$tmp/foo"
@@ -458,6 +536,8 @@ sbt=$tmp/scratch-bt
 mkdir -p "$sbt/bin" "$sbt/config" "$tmp/stubs" "$tmp/guard" "$tmp/fab/common/conf" "$tmp/builds"
 cp "$BT/bt-layer" "$sbt/bt-layer"
 cp "$BT/bin/layer-lib" "$sbt/bin/layer-lib"
+mkdir -p "$sbt/conf"
+cp "$BT/conf/layer-inert-keys" "$sbt/conf/layer-inert-keys"
 printf '#!/bin/bash\ntouch "$1.hash"\n' > "$sbt/bin/generate-signature"
 printf '#!/bin/bash\necho 1.1.1\n' > "$tmp/stubs/fab"
 printf '#!/bin/bash\necho trixie\n' > "$tmp/stubs/lsb_release"
@@ -565,6 +645,12 @@ expect_fail no-debug-target "$sbt/bt-layer" nodebug
 expect_fail make-fails "$sbt/bt-layer" broken --parent core
 [[ ! -e "$FAB_PATH/altstraps/trixie-amd64.core" ]] || fatal "altstrap left behind after failed make"
 grep -q 'test ! -f FAIL' "$L/broken.log" || fatal "build log not written on failure"
+write_product "$tmp/products/leaky" "turnkey.d" "turnkey.d"
+printf -- '-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n' > "$tmp/products/leaky/LEAK"
+out=$("$sbt/bt-layer" leaky --parent core 2>&1) && fatal "leaky: a layer carrying a private key was exported"
+[[ "$out" == *"/etc/ssh/ssh_host_rsa_key"* ]] || fatal "leaky: the key is not named: $out"
+[[ ! -e "$L/leaky.tar.zst" ]] || fatal "leaky: a tarball was written"
+[[ ! -e "$L/leaky.manifest" ]] || fatal "leaky: a manifest was written"
 
 info "22: bt-layer with units (a component supplied as a fab unit)"
 # add_unit PRODUCT NAME VERSION: a unit fab would apply, pinned by a version
