@@ -300,7 +300,14 @@ s=$tmp/sample
 mkdir -p "$s"
 measure_tree_record "$fix/c1" > "$s/tree.tsv"
 measure_state_sample "$fix/c1" "$s/tree.tsv" "$s" 100000 "$globs"
-assert_eq sample-count "$(wc -l < "$s/state.tsv")" 4
+# which fixture paths were sampled, not how many, so a state path added to
+# the committed list that happens to match a fixture file does not break this
+assert_grep sample-has-shadow "^\./etc/shadow	sampled	" "$(cat "$s/state.tsv")"
+assert_grep sample-has-priv "^\./var/lib/mysql/mysql/global_priv\.MAD	sampled	" "$(cat "$s/state.tsv")"
+assert_grep sample-has-fixed "^\./var/lib/mysql/fixed\.cnf	sampled	" "$(cat "$s/state.tsv")"
+assert_grep sample-has-ibdata "^\./var/lib/mysql/ibdata1	sampled	" "$(cat "$s/state.tsv")"
+assert_no_grep sample-not-hostname "^\./etc/hostname	" "$(cat "$s/state.tsv")"
+assert_no_grep sample-not-log "^\./var/log/" "$(cat "$s/state.tsv")"
 assert_eq sample-shadow "$(cat "$s/state/etc/shadow")" "$(cat "$fix/c1/etc/shadow")"
 assert_grep sample-flag "	sampled	" "$(cat "$s/state.tsv")"
 s2=$tmp/sample-cap
