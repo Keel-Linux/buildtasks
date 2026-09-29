@@ -133,8 +133,8 @@ measures ten files:
 | bin/generate-signature | 87 of 87 | 100 percent |
 | bin/layer-measure-lib | 206 of 206 | 100 percent |
 | bin/layer-compare-lib | 330 of 330 | 100 percent |
-| bin/layer-report-lib | 270 of 270 | 100 percent |
-| bt-layer-measure | 77 of 77 | 100 percent |
+| bin/layer-report-lib | 273 of 273 | 100 percent |
+| bt-layer-measure | 78 of 78 | 100 percent |
 
 The gate stays at 99, the lowest file rounded down. All four new files are at
 100 percent line and branch: every subcommand, every exit code (0, 1, 2 and

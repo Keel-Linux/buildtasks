@@ -598,6 +598,14 @@ assert_grep anchor-override "OVERRIDE" "$r"
 assert_grep anchor-override-why "read by hand" "$r"
 assert_grep anchor-committed "^committed " "$r"
 assert_grep anchor-carried "captures agree on the list" "$r"
+# declared on captures that carry the committed list, the override was not
+# needed: the block says so and does not claim a mismatch its own two digests
+# contradict
+r=$("$M" attribute --dir "$caps" --unit u1 --control c1 --control-again c2 \
+    --control-again c3 --state-paths-override "declared for no reason" || true)
+assert_no_grep anchor-unneeded-claim "^OVERRIDE " "$r"
+assert_grep anchor-unneeded "^override      declared and not needed" "$r"
+assert_grep anchor-unneeded-why "declared for no reason" "$r"
 
 info "17: blind because nothing was sampled"
 capture c1 s1 --state-max-bytes 8 > /dev/null

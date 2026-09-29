@@ -134,7 +134,9 @@ be harmless in the only direction it acted; now the same knob points both ways,
 and adding `./var/lib/**` to it would make a `./var/lib/**` waiver legal.
 Captures taken against another list are refused unless the run declares a
 reason with `--state-paths-override`, which the block prints as `OVERRIDE`
-beside both digests.
+beside both digests. A reason given on captures that do carry the committed
+list is printed on an `override` line as declared and not needed, so the block never
+asserts a mismatch its own two digests contradict.
 
 ### Why a tab, and why the path comes first
 
