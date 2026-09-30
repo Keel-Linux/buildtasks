@@ -568,6 +568,50 @@ layer_audit_keys() {
     return 0
 }
 
+# The machine identity a layer ships. Every image built from a layer holds
+# the same bytes, so an id in a layer is an id every machine made from it
+# shares: the same DHCP DUID and IAID, the same journal and networkd
+# identity, the same MariaDB server_id (docs/traps.md, "Every appliance built
+# from core has the same machine-id"). The build always leaves one, whatever
+# the parent shipped: the bootstrap carries one, and systemd's postinst runs
+# systemd-machine-id-setup on every configure, so a child that upgrades
+# systemd writes a fresh one of its own.
+#
+# /etc/machine-id is left an empty file, as Debian's cloud images ship it,
+# and systemd makes the id at each machine's boot. Not missing and not
+# "uninitialized": either makes that boot a first boot to systemd, which
+# presets every unit and undoes what the build enabled and masked
+# (machine-id(5), "First Boot Semantics"). D-Bus's copy becomes the link to
+# it that tmpfiles.d/dbus.conf makes when it is absent, because systemd reads
+# that file when /etc/machine-id is empty and would bring the old id back.
+LAYER_MACHINE_ID=etc/machine-id
+LAYER_DBUS_MACHINE_ID=var/lib/dbus/machine-id
+
+# A tree already in that state is not written, so a child layer does not
+# copy its parent's empty file up into its own tarball.
+layer_reset_machine_id() {
+    local rootfs=$1
+    local id=$rootfs/$LAYER_MACHINE_ID
+    local dbus=$rootfs/$LAYER_DBUS_MACHINE_ID
+    if [[ ! -d "$rootfs/etc" ]]; then
+        layer_error "no /etc in $rootfs to reset the machine-id in"
+        return 1
+    fi
+    if [[ -L "$id" || ! -f "$id" || -s "$id" ]]; then
+        if ! { rm -f "$id" && : > "$id" && chmod 0444 "$id"; } 2>/dev/null; then
+            layer_error "cannot leave an empty /$LAYER_MACHINE_ID in $rootfs"
+            return 1
+        fi
+    fi
+    if [[ -e "$dbus" || -L "$dbus" ]] && [[ "$(readlink "$dbus")" != "/$LAYER_MACHINE_ID" ]]; then
+        if ! { rm -f "$dbus" && ln -s "/$LAYER_MACHINE_ID" "$dbus"; } 2>/dev/null; then
+            layer_error "cannot link /$LAYER_DBUS_MACHINE_ID to /$LAYER_MACHINE_ID in $rootfs"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 layer_check_build() {
     local kind=$1
     local build_dir=$2

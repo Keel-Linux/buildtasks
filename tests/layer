@@ -30,6 +30,9 @@
 #     named, a quoted marker, a binary, a symlink out of the tree, an example
 #     unlisted, listed, its digest elsewhere, its path with another digest,
 #     grep failing, grep missing, the committed list well formed);
+#     layer_reset_machine_id (an id and a D-Bus copy, already reset and
+#     left untouched, missing, a symlink, a D-Bus link elsewhere, no D-Bus
+#     copy, no /etc, a directory in the way of either);
 #     layer_check_build (ok, no stamp, not mounted, no upper, a private key,
 #     no key list);
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
@@ -37,7 +40,9 @@
 #     layer_parse_args (help, name, parent, use-existing, no name, two
 #     names, unknown option, parent without value, self parent).
 #   bt-layer: --help; usage error; missing config; missing FAB_PATH; missing
-#     product; bad epoch; rootfs build with warning on BT_GPGKEY; RELEASE and
+#     product; bad epoch; rootfs build with warning on BT_GPGKEY, exported
+#     with an empty machine-id whatever the build left, refused when it
+#     cannot be reset; RELEASE and
 #     FAB_ARCH fallbacks; unmount guard; delta build with parent (overrides,
 #     altstrap created and removed, hash file with BT_GPGKEY); repeated
 #     export with -u is byte identical; -u without a build; unknown parent;
@@ -126,6 +131,10 @@ build/stamps/root.patched:
 	printf '#!/bin/sh\\n' > build/root.patched/bin/bash
 	chmod 755 build/root.patched/bin/bash
 	echo hostname > build/root.patched/etc/hostname
+	mkdir -p build/root.patched/var/lib/dbus
+	echo f0e97605ab594989b4d78f4a126b5b37 > build/root.patched/etc/machine-id
+	cp build/root.patched/etc/machine-id build/root.patched/var/lib/dbus/machine-id
+	if [ -f IDDIR ]; then rm build/root.patched/etc/machine-id && mkdir -p build/root.patched/etc/machine-id/x; fi
 	if [ -f LEAK ]; then mkdir -p build/root.patched/etc/ssh && cp LEAK build/root.patched/etc/ssh/ssh_host_rsa_key; fi
 	echo lib > build/.deck/root.build/upper/usr/lib/x.so
 	echo deb > build/.deck/root.build/upper/var/cache/apt/archives/x.deb
@@ -468,6 +477,61 @@ LAYER_GREP=$tmp/no-such-grep expect_fail keys-no-grep layer_audit_keys "$keys_ro
 awk '!/^[[:space:]]*(#|$)/ && !($1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^\// && NF == 2) { bad = 1; print "bad line: " $0 } END { exit bad }' \
     "$BT/conf/layer-inert-keys" || fatal "conf/layer-inert-keys has a malformed line"
 
+info "10d: layer_reset_machine_id"
+# the machine-id every image carried on 2026-09-30, and the D-Bus copy of it
+# dbus-daemon's postinst wrote as a file of its own
+mid_root=$tmp/midfs
+mkdir -p "$mid_root/etc" "$mid_root/var/lib/dbus"
+echo f0e97605ab594989b4d78f4a126b5b37 > "$mid_root/etc/machine-id"
+chmod 0444 "$mid_root/etc/machine-id"
+cp "$mid_root/etc/machine-id" "$mid_root/var/lib/dbus/machine-id"
+layer_reset_machine_id "$mid_root"
+[[ -f "$mid_root/etc/machine-id" && ! -L "$mid_root/etc/machine-id" ]] || fatal "mid-reset: not a regular file"
+[[ ! -s "$mid_root/etc/machine-id" ]] || fatal "mid-reset: the id is still there"
+assert_eq mid-mode "$(stat -c %a "$mid_root/etc/machine-id")" 444
+[[ -L "$mid_root/var/lib/dbus/machine-id" ]] || fatal "mid-dbus: not a symlink"
+assert_eq mid-dbus-target "$(readlink "$mid_root/var/lib/dbus/machine-id")" /etc/machine-id
+# a tree already reset is left as it is, so a child layer does not copy the
+# parent's empty file up into its own tarball
+touch -d @1234567890 "$mid_root/etc/machine-id"
+chmod 0644 "$mid_root/etc/machine-id"
+touch -h -d @1234567890 "$mid_root/var/lib/dbus/machine-id"
+layer_reset_machine_id "$mid_root"
+assert_eq mid-untouched "$(stat -c '%a %Y' "$mid_root/etc/machine-id")" "644 1234567890"
+assert_eq mid-dbus-untouched "$(stat -c %Y "$mid_root/var/lib/dbus/machine-id")" 1234567890
+# missing means a first boot to systemd, which presets every unit: an empty
+# file is made
+rm "$mid_root/etc/machine-id"
+layer_reset_machine_id "$mid_root"
+[[ -f "$mid_root/etc/machine-id" && ! -s "$mid_root/etc/machine-id" ]] || fatal "mid-missing: no empty file"
+# a symlink, even to an empty file, is replaced by a file of the tree's own
+rm "$mid_root/etc/machine-id"
+: > "$tmp/elsewhere-id"
+ln -s "$tmp/elsewhere-id" "$mid_root/etc/machine-id"
+layer_reset_machine_id "$mid_root"
+[[ -f "$mid_root/etc/machine-id" && ! -L "$mid_root/etc/machine-id" ]] || fatal "mid-symlink: still a link"
+# a D-Bus link to anything but /etc/machine-id is replaced
+ln -sfn /var/lib/dbus/other "$mid_root/var/lib/dbus/machine-id"
+layer_reset_machine_id "$mid_root"
+assert_eq mid-dbus-relink "$(readlink "$mid_root/var/lib/dbus/machine-id")" /etc/machine-id
+# no D-Bus copy stays none: tmpfiles.d/dbus.conf makes the link at boot
+rm "$mid_root/var/lib/dbus/machine-id"
+layer_reset_machine_id "$mid_root"
+[[ ! -e "$mid_root/var/lib/dbus/machine-id" && ! -L "$mid_root/var/lib/dbus/machine-id" ]] \
+    || fatal "mid-no-dbus: a D-Bus copy was made"
+expect_fail mid-no-etc layer_reset_machine_id "$tmp/no-such-root"
+out=$(layer_reset_machine_id "$tmp/no-such-root" 2>&1) || true
+[[ "$out" == *"no /etc"* ]] || fatal "mid-no-etc: unexpected message: $out"
+rm "$mid_root/etc/machine-id"
+mkdir "$mid_root/etc/machine-id"
+expect_fail mid-directory layer_reset_machine_id "$mid_root"
+rmdir "$mid_root/etc/machine-id"
+mkdir -p "$mid_root/var/lib/dbus/machine-id/x"
+expect_fail mid-dbus-directory layer_reset_machine_id "$mid_root"
+out=$(layer_reset_machine_id "$mid_root" 2>&1) || true
+[[ "$out" == *"cannot link /var/lib/dbus/machine-id"* ]] || fatal "mid-dbus-directory: unexpected message: $out"
+rm -r "$mid_root/var/lib/dbus/machine-id"
+
 info "11: layer_check_build"
 build=$tmp/build
 expect_fail check-nostamp layer_check_build rootfs "$build" "$keys_list"
@@ -606,7 +670,13 @@ assert_eq core-size "$(layer_manifest_get "$L/core.manifest" size)" "$(stat -c %
 assert_eq core-sha256-file "$(cut -d ' ' -f 1 "$L/core.tar.zst.sha256")" \
     "$(layer_manifest_get "$L/core.manifest" sha256)"
 assert_eq core-members "$(zstd -dc "$L/core.tar.zst" | tar -t | sort | tr '\n' ' ')" \
-    "./ ./bin/ ./bin/bash ./etc/ ./etc/hostname "
+    "./ ./bin/ ./bin/bash ./etc/ ./etc/hostname ./etc/machine-id ./var/ ./var/lib/ ./var/lib/dbus/ ./var/lib/dbus/machine-id "
+# the build wrote an id; the layer, and the rootfs its children start from,
+# carry an empty file and a D-Bus link to it
+assert_eq core-machine-id "$(zstd -dc "$L/core.tar.zst" | tar -xO ./etc/machine-id | wc -c)" 0
+assert_eq core-dbus-link "$(zstd -dc "$L/core.tar.zst" | tar -tv ./var/lib/dbus/machine-id | awk '{print $NF}')" \
+    /etc/machine-id
+[[ ! -s "$L/core.rootfs/etc/machine-id" ]] || fatal "core.rootfs: the machine-id is still there"
 assert_eq core-mtime "$(zstd -dc "$L/core.tar.zst" | tar -tv --full-time ./etc/hostname | awk '{print $4}')" \
     "$(date -u -d @1700000000 +%F)"
 
@@ -660,6 +730,12 @@ out=$("$sbt/bt-layer" leaky --parent core 2>&1) && fatal "leaky: a layer carryin
 [[ "$out" == *"/etc/ssh/ssh_host_rsa_key"* ]] || fatal "leaky: the key is not named: $out"
 [[ ! -e "$L/leaky.tar.zst" ]] || fatal "leaky: a tarball was written"
 [[ ! -e "$L/leaky.manifest" ]] || fatal "leaky: a manifest was written"
+# a machine-id that cannot be reset stops the export the same way
+write_product "$tmp/products/idless" "turnkey.d" "turnkey.d"
+touch "$tmp/products/idless/IDDIR"
+out=$("$sbt/bt-layer" idless --parent core 2>&1) && fatal "idless: a layer whose machine-id cannot be reset was exported"
+[[ "$out" == *"cannot reset the machine-id of idless"* ]] || fatal "idless: unexpected message: $out"
+[[ ! -e "$L/idless.tar.zst" ]] || fatal "idless: a tarball was written"
 
 info "22: bt-layer with units (a component supplied as a fab unit)"
 # add_unit PRODUCT NAME VERSION: a unit fab would apply, pinned by a version

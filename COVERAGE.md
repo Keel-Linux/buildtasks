@@ -59,6 +59,21 @@ pattern, the digest match, the grep status check, `-I` or the symlink rule
 each turns the suite red. Coverage: layer-lib and bt-layer unchanged at one
 uncovered line each, the same lines as on 19.x.
 
+## 2026-09-30: the machine-id reset
+
+`layer_reset_machine_id` leaves every exported layer with an empty
+`/etc/machine-id` and `/var/lib/dbus/machine-id` as a link to it, so systemd
+gives each machine its own id at boot (docs/traps.md, "Every appliance built
+from core has the same machine-id"). `bt-layer` runs it after
+`layer_check_build`, before the rootfs copy and the tarball. `tests/layer`
+covers a populated id and D-Bus copy, a tree already reset left untouched
+(file and link), a missing id, a symlinked id, a D-Bus link elsewhere, no
+D-Bus copy, no `/etc`, a directory in the way of either, the `core` tarball
+and rootfs of a build that wrote an id, and a `bt-layer` run whose id cannot
+be reset (refused, no tarball). Mutating each condition or the mode turns the
+suite red. Coverage: layer-lib 383 of 384 and bt-layer 111 of 112, the same
+one uncovered line each as on 19.x.
+
 ## 2026-09-26: the signing identity
 
 `bin/generate-signature` no longer hardcodes TurnKey's release key. Its logic
