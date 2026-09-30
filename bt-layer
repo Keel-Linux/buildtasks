@@ -186,6 +186,8 @@ fi
 
 layer_check_build "$kind" "$build_dir" "$BT/conf/layer-inert-keys" \
     || fatal "nothing to export for $layer"
+layer_reset_machine_id "$build_dir/root.patched" \
+    || fatal "cannot reset the machine-id of $layer"
 
 rootfs_copy=$layers_dir/$layer.rootfs
 info "copying root.patched to $rootfs_copy"
