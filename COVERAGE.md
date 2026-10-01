@@ -71,7 +71,7 @@ bt-xen, bt-openstack, bt-ec2, bt-otc, bt-docker and the others), resets the
 id after the chroot work. The new suite `tests/machine-id` makes small ISOs
 with mksquashfs and xorriso, so CI installs `squashfs-tools` and `xorriso`.
 Reverting the `bt-iso` or the `rootfs-cleanup` change each turns it red.
-Coverage: bin/reset-machine-id 9 of 9, bin/iso-machine-id-check 35 of 35,
+Coverage: bin/reset-machine-id 9 of 9, bin/iso-machine-id-check 30 of 30,
 bin/rootfs-cleanup 11 of 11, layer-lib 390 of 391 (the predicate covered in
 `tests/layer`, the same one uncovered line as on 19.x), bt-layer unchanged.
 

@@ -406,8 +406,14 @@ else
     # it, since nothing it depends on has changed
     make build/stamps/root.patched 2>&1 | tee build/log || true
     if [[ -f build/stamps/root.patched ]]; then
-        "$BT/bin/reset-machine-id" build/root.patched \
-            || fatal "cannot reset the machine-id of $appname"
+        # a root.sandbox left mounted on root.patched by an earlier run
+        # (DEBUG skips the clean) would be an overlay whose lower layer
+        # changes under it
+        deck -D build/root.sandbox 2>/dev/null || true
+        if ! "$BT/bin/reset-machine-id" build/root.patched; then
+            [[ -n "$BT_DEBUG" ]] || product_build_clean
+            fatal "cannot reset the machine-id of $appname"
+        fi
         make 2>&1 | tee -a build/log || true
     fi
 
@@ -421,8 +427,13 @@ fi
 
 # whether built here or reused with -u, an ISO that ships a machine-id is
 # not released, nor screenshot
-"$BT/bin/iso-machine-id-check" build/product.iso \
-    || fatal "build/product.iso ships a machine-id - rebuild it without -u"
+if ! "$BT/bin/iso-machine-id-check" build/product.iso; then
+    if [[ -n "$use_existing" ]]; then
+        fatal "build/product.iso ships a machine-id - rebuild it without -u"
+    fi
+    [[ -n "$BT_DEBUG" ]] || product_build_clean
+    fatal "build/product.iso ships a machine-id although root.patched was reset - a build step after it wrote one"
+fi
 
 if [[ -z "$no_screens" ]]; then
     if [[ -n "$use_existing" ]]; then

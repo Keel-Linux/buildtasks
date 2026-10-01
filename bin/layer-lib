@@ -581,7 +581,9 @@ layer_audit_keys() {
 # and systemd makes the id at each machine's boot. Not missing and not
 # "uninitialized": either makes that boot a first boot to systemd, which runs
 # preset-all over every unit (machine-id(5), "First Boot Semantics"). Built
-# without first-boot-full-preset, as Debian's is, that only enables: every
+# without first-boot-full-preset, as Debian 13's systemd 257 is (upstream
+# means to make it the default later, so check again on forky), that only
+# enables: every
 # unit a preset enables is enabled, including the ones the build disabled on
 # purpose, and nothing is disabled. D-Bus's copy becomes the link to
 # it that tmpfiles.d/dbus.conf makes when it is absent, because systemd reads

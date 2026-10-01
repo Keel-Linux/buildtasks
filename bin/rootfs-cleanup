@@ -36,5 +36,5 @@ fuser -k "$rootfs" || true
 # rootfs comes from the ISO, and systemd's postinst writes a machine-id of
 # its own on every configure, so whatever ran since the ISO was made may
 # have left one that every machine made from this image would share.
-"$(dirname "$(readlink -f "$0")")/reset-machine-id" "$rootfs" \
-    || fatal "cannot reset the machine-id of $rootfs"
+# reset-machine-id says what failed
+"$(dirname "$(readlink -f "$0")")/reset-machine-id" "$rootfs" || exit 1

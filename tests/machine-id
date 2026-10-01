@@ -15,7 +15,8 @@
 #     reset after it, a reset that fails stops it;
 #   bin/iso-machine-id-check: usage, no such file, a tool missing, a clean
 #     ISO, an ISO with an id, with a D-Bus copy of its own, with no
-#     machine-id at all, with a symlinked one, an ISO without the squashfs,
+#     machine-id at all, with a symlinked one, with a directory, an ISO in a
+#     read-only directory, an ISO without the squashfs,
 #     a squashfs that cannot be read, ISO_SQUASHFS elsewhere;
 #   bt-iso: a build whose root.patched carries an id makes an ISO without
 #     one; -u with an ISO that carries one is refused before release; a
@@ -173,12 +174,12 @@ populated_root "$r"
 make_iso "$r" "$tmp/dirty.iso"
 msg=$("$check" "$tmp/dirty.iso" 2>&1) && fatal "check-dirty: an ISO with an id passed"
 [[ "$msg" == *"does not ship an empty machine-id"* ]] || fatal "check-dirty: unexpected message: $msg"
-[[ "$msg" == *"'$OLD_ID'"* ]] || fatal "check-dirty: the id is not named: $msg"
-[[ "$msg" == *"a file of its own"* ]] || fatal "check-dirty: the D-Bus copy is not named: $msg"
+[[ "$msg" == *"/etc/machine-id is a file holding '$OLD_ID'"* ]] || fatal "check-dirty: the id is not named: $msg"
+[[ "$msg" == *"/var/lib/dbus/machine-id is a file holding '$OLD_ID'"* ]] || fatal "check-dirty: the D-Bus copy is not named: $msg"
 rm "$r/var/lib/dbus/machine-id"
 make_iso "$r" "$tmp/id-only.iso"
 msg=$("$check" "$tmp/id-only.iso" 2>&1) && fatal "check-id-only: an ISO with an id passed"
-[[ "$msg" == *"/var/lib/dbus/machine-id is absent"* ]] || fatal "check-id-only: unexpected message: $msg"
+[[ "$msg" == *"/var/lib/dbus/machine-id is missing"* ]] || fatal "check-id-only: unexpected message: $msg"
 cp "$r/etc/machine-id" "$r/var/lib/dbus/machine-id"
 layer_reset_machine_id "$r"
 make_iso "$r" "$tmp/clean.iso"
@@ -190,7 +191,7 @@ make_iso "$r" "$tmp/no-dbus.iso"
 echo "$OLD_ID" > "$r/var/lib/dbus/machine-id"
 make_iso "$r" "$tmp/dbus-file.iso"
 msg=$("$check" "$tmp/dbus-file.iso" 2>&1) && fatal "check-dbus-file: should have failed"
-[[ "$msg" == *"/etc/machine-id is '',"* ]] || fatal "check-dbus-file: unexpected message: $msg"
+[[ "$msg" == *"/etc/machine-id is a file holding '',"* ]] || fatal "check-dbus-file: unexpected message: $msg"
 rm "$r/var/lib/dbus/machine-id"
 ln -s /var/lib/dbus/other "$r/var/lib/dbus/machine-id"
 rm "$r/etc/machine-id"
@@ -202,8 +203,22 @@ ln -s /run/machine-id "$r/etc/machine-id"
 make_iso "$r" "$tmp/link-id.iso"
 msg=$("$check" "$tmp/link-id.iso" 2>&1) && fatal "check-link: a symlinked machine-id passed"
 [[ "$msg" == *"/etc/machine-id is a link to /run/machine-id"* ]] || fatal "check-link: unexpected message: $msg"
+rm "$r/etc/machine-id"
+mkdir -p "$r/etc/machine-id/x"
+make_iso "$r" "$tmp/dir-id.iso"
+msg=$("$check" "$tmp/dir-id.iso" 2>&1) && fatal "check-dir: a directory at the machine-id passed"
+[[ "$msg" == *"/etc/machine-id is a directory"* ]] || fatal "check-dir: unexpected message: $msg"
+rm -r "$r/etc/machine-id"
+# the squashfs is copied out next to the ISO, never to /tmp, and removed
+! compgen -G "$tmp/.iso-machine-id-check.*" >/dev/null || fatal "check-work: a work directory was left next to the ISO"
+mkdir -p "$tmp/ro"
+cp "$tmp/clean.iso" "$tmp/ro/clean.iso"
+chmod 555 "$tmp/ro"
+msg=$("$check" "$tmp/ro/clean.iso" 2>&1) && fatal "check-ro: should have failed beside a read-only ISO"
+[[ "$msg" == *"cannot make a work directory next to"* ]] || fatal "check-ro: unexpected message: $msg"
+chmod 755 "$tmp/ro"
 # fab's layout is the default; another path is read when asked for
-rm "$r/etc/machine-id" "$r/var/lib/dbus/machine-id"
+rm -f "$r/etc/machine-id" "$r/var/lib/dbus/machine-id"
 layer_reset_machine_id "$r"
 make_iso "$r" "$tmp/elsewhere.iso" /casper/filesystem.squashfs
 msg=$("$check" "$tmp/elsewhere.iso" 2>&1) && fatal "check-no-squashfs: should have failed"
