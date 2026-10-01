@@ -6,13 +6,15 @@
 #   bin/layer-measure-lib, bin/layer-report-lib and bt-layer-measure under
 #     tests/measure
 #   bin/layer-compare-lib under tests/compare
+#   bin/reset-machine-id, bin/iso-machine-id-check and bin/rootfs-cleanup
+#     under tests/machine-id
 # Exits 1 when a measured file is below the threshold (default 95), 2 when a
 # tool is missing.
 #
 #   tests/coverage.sh [THRESHOLD]     (or COVERAGE_THRESHOLD in the environment)
 #
 # COVERAGE_DIR keeps the kcov report (default: a temporary directory).
-# Needs the Debian packages kcov, zstd, git and gpg.
+# Needs the Debian packages kcov, zstd, git, gpg, squashfs-tools and xorriso.
 #
 # The tests run the bt-* scripts from a scratch copy (they need their own
 # config directory), so kcov lists the copy next to the checkout: the two
@@ -25,7 +27,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 threshold="${1:-${COVERAGE_THRESHOLD:-95}}"
 
-for tool in kcov zstd git gpg; do
+for tool in kcov zstd git gpg mksquashfs unsquashfs xorriso; do
     if ! command -v "$tool" >/dev/null; then
         echo "$tool not found (apt-get install $tool)" >&2
         exit 2
@@ -33,9 +35,9 @@ for tool in kcov zstd git gpg; do
 done
 
 report="${COVERAGE_DIR:-$(mktemp -d)}"
-measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo,/bin/signature-lib,/bin/generate-signature,/bin/layer-measure-lib,/bin/layer-compare-lib,/bin/layer-report-lib,/bt-layer-measure
+measured=/bin/layer-lib,/bt-layer,/bin/aplinfo-lib,/bt-aplinfo,/bin/signature-lib,/bin/generate-signature,/bin/layer-measure-lib,/bin/layer-compare-lib,/bin/layer-report-lib,/bt-layer-measure,/bin/reset-machine-id,/bin/iso-machine-id-check,/bin/rootfs-cleanup
 skipped=/tests/,/scratch-bt/bin/generate-signature
-for suite in layer aplinfo signature measure compare; do
+for suite in layer aplinfo signature measure compare machine-id; do
     kcov --include-pattern="$measured" --exclude-pattern="$skipped" \
         "$report" "$here/$suite"
 done

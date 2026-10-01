@@ -59,6 +59,22 @@ pattern, the digest match, the grep status check, `-I` or the symlink rule
 each turns the suite red. Coverage: layer-lib and bt-layer unchanged at one
 uncovered line each, the same lines as on 19.x.
 
+## 2026-10-01: the machine-id of the ISO and the images made from it
+
+`bin/reset-machine-id` applies `layer_reset_machine_id` to any rootfs, and
+`bin/iso-machine-id-check` refuses an ISO whose live squashfs carries an id,
+read with `layer_machine_id_is_reset` (Keel-Linux/tracker#24). `bt-iso` builds
+`root.patched` first, resets it, then lets fab squash it, and checks the ISO
+before screenshots and release, `-u` included. `bin/rootfs-cleanup`, which
+every image made from the ISO's rootfs runs last (bt-vm, bt-container,
+bt-xen, bt-openstack, bt-ec2, bt-otc, bt-docker and the others), resets the
+id after the chroot work. The new suite `tests/machine-id` makes small ISOs
+with mksquashfs and xorriso, so CI installs `squashfs-tools` and `xorriso`.
+Reverting the `bt-iso` or the `rootfs-cleanup` change each turns it red.
+Coverage: bin/reset-machine-id 9 of 9, bin/iso-machine-id-check 30 of 30,
+bin/rootfs-cleanup 11 of 11, layer-lib 390 of 391 (the predicate covered in
+`tests/layer`, the same one uncovered line as on 19.x), bt-layer unchanged.
+
 ## 2026-09-30: the machine-id reset
 
 `layer_reset_machine_id` leaves every exported layer with an empty

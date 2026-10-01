@@ -1,0 +1,313 @@
+#!/bin/bash -e
+# Test that the images which do not go through bt-layer ship an empty
+# machine-id too (Keel-Linux/tracker#24): the ISO bt-iso writes, and every
+# image made from the ISO's rootfs through bin/rootfs-cleanup (bt-vm,
+# bt-container, bt-xen, bt-openstack and the others). Nothing is built:
+# products are fake Makefiles, and the ISOs are made from a few files with
+# mksquashfs and xorriso.
+#
+# Code paths covered:
+#   layer_machine_id_is_reset: reset, populated, missing, a symlink, empty
+#     but a D-Bus copy of its own, a D-Bus link elsewhere, no D-Bus copy;
+#   bin/reset-machine-id: usage, no such directory, an id and a D-Bus copy
+#     reset, a tree already reset left untouched, an id that cannot be reset;
+#   bin/rootfs-cleanup: usage, no such directory, the chroot cleanup and the
+#     reset after it, a reset that fails stops it;
+#   bin/iso-machine-id-check: usage, no such file, a tool missing, a clean
+#     ISO, an ISO with an id, with a D-Bus copy of its own, with no
+#     machine-id at all, with a symlinked one, with a directory, an ISO in a
+#     read-only directory, an ISO without the squashfs,
+#     a squashfs that cannot be read, ISO_SQUASHFS elsewhere;
+#   bt-iso: a build whose root.patched carries an id makes an ISO without
+#     one; -u with an ISO that carries one is refused before release; a
+#     build whose root.patched fails stops before the ISO.
+
+fatal() { echo "FATAL [$(basename "$0")]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$(basename "$0")]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $0
+Test the machine-id reset of the ISO and the images made from it
+EOF
+exit 1
+}
+
+[[ "$1" != "-h" ]] && [[ "$1" != "--help" ]] || usage
+
+for tool in mksquashfs unsquashfs xorriso git make; do
+    command -v "$tool" >/dev/null || fatal "$tool not found"
+done
+
+BT=$(dirname "$(dirname "$(readlink -f "$0")")")
+export BT
+source "$BT/bin/layer-lib"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+expect_fail() {
+    local label=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fatal "$label: should have failed"
+    fi
+}
+
+assert_eq() {
+    local label=$1
+    local got=$2
+    local want=$3
+    [[ "$got" == "$want" ]] || fatal "$label: got '$got', want '$want'"
+}
+
+# the id every image carried on 2026-09-30
+OLD_ID=f0e97605ab594989b4d78f4a126b5b37
+
+# populated_root DIR: a tree with an id and the D-Bus copy of it that
+# dbus-daemon's postinst writes as a file of its own
+populated_root() {
+    mkdir -p "$1/etc" "$1/var/lib/dbus"
+    echo "$OLD_ID" > "$1/etc/machine-id"
+    cp "$1/etc/machine-id" "$1/var/lib/dbus/machine-id"
+}
+
+# assert_reset LABEL DIR
+assert_reset() {
+    [[ -f "$2/etc/machine-id" && ! -L "$2/etc/machine-id" ]] || fatal "$1: not a regular file"
+    [[ ! -s "$2/etc/machine-id" ]] || fatal "$1: the id is still there"
+    assert_eq "$1-dbus" "$(readlink "$2/var/lib/dbus/machine-id")" /etc/machine-id
+}
+
+# make_iso DIR ISO [PATH]: DIR squashed to PATH (default
+# /live/10root.squashfs) inside ISO, the way fab lays it out
+make_iso() {
+    local dir=$1
+    local iso=$2
+    local path=${3:-/live/10root.squashfs}
+    local cd=$tmp/cd.$RANDOM
+    mkdir -p "$cd$(dirname "$path")"
+    mksquashfs "$dir" "$cd$path" -quiet -no-progress -noappend >/dev/null
+    xorriso -as mkisofs -quiet -r -J -o "$iso" "$cd" >/dev/null 2>&1
+    rm -rf "$cd"
+}
+
+info "1: layer_machine_id_is_reset"
+r=$tmp/pred
+mkdir -p "$r/etc" "$r/var/lib/dbus"
+: > "$r/etc/machine-id"
+ln -s /etc/machine-id "$r/var/lib/dbus/machine-id"
+layer_machine_id_is_reset "$r" || fatal "pred-reset: a reset tree is not reset"
+rm "$r/var/lib/dbus/machine-id"
+layer_machine_id_is_reset "$r" || fatal "pred-no-dbus: no D-Bus copy is reset"
+echo "$OLD_ID" > "$r/var/lib/dbus/machine-id"
+expect_fail pred-dbus-file layer_machine_id_is_reset "$r"
+rm "$r/var/lib/dbus/machine-id"
+ln -s /var/lib/dbus/other "$r/var/lib/dbus/machine-id"
+expect_fail pred-dbus-elsewhere layer_machine_id_is_reset "$r"
+rm "$r/var/lib/dbus/machine-id"
+echo "$OLD_ID" > "$r/etc/machine-id"
+expect_fail pred-populated layer_machine_id_is_reset "$r"
+rm "$r/etc/machine-id"
+expect_fail pred-missing layer_machine_id_is_reset "$r"
+: > "$tmp/empty-elsewhere"
+ln -s "$tmp/empty-elsewhere" "$r/etc/machine-id"
+expect_fail pred-symlink layer_machine_id_is_reset "$r"
+
+info "2: bin/reset-machine-id"
+msg=$("$BT/bin/reset-machine-id" 2>&1) && fatal "reset-usage: should have failed"
+[[ "$msg" == *"Syntax:"* ]] || fatal "reset-usage: no syntax: $msg"
+msg=$("$BT/bin/reset-machine-id" "$tmp/no-such-root" 2>&1) && fatal "reset-missing: should have failed"
+[[ "$msg" == *"no such directory"* ]] || fatal "reset-missing: unexpected message: $msg"
+r=$tmp/reset
+populated_root "$r"
+"$BT/bin/reset-machine-id" "$r"
+assert_reset reset "$r"
+assert_eq reset-mode "$(stat -c %a "$r/etc/machine-id")" 444
+# a tree already reset is left as it is
+touch -d @1234567890 "$r/etc/machine-id"
+"$BT/bin/reset-machine-id" "$r"
+assert_eq reset-untouched "$(stat -c %Y "$r/etc/machine-id")" 1234567890
+# with BT pointing at another checkout, the library beside the script is used
+env BT="$tmp/nowhere" "$BT/bin/reset-machine-id" "$r"
+rm "$r/etc/machine-id"
+mkdir "$r/etc/machine-id"
+msg=$("$BT/bin/reset-machine-id" "$r" 2>&1) && fatal "reset-dir: should have failed"
+[[ "$msg" == *"cannot reset the machine-id of $r"* ]] || fatal "reset-dir: unexpected message: $msg"
+
+info "3: bin/rootfs-cleanup"
+mkdir -p "$tmp/stubs"
+# tklpatch-chroot runs the cleanup in the chroot and, like any package
+# configured in there, may write an id: the stub does both
+cat > "$tmp/stubs/tklpatch-chroot" <<EOF
+#!/bin/bash
+echo "\$*" >> "$tmp/chroot.log"
+rm -f "\$1/etc/machine-id"
+echo $OLD_ID > "\$1/etc/machine-id"
+EOF
+printf '#!/bin/bash\necho "$*" >> "%s/fuser.log"\n' "$tmp" > "$tmp/stubs/fuser"
+chmod 755 "$tmp/stubs"/*
+export PATH=$tmp/stubs:$PATH
+msg=$("$BT/bin/rootfs-cleanup" 2>&1) && fatal "cleanup-usage: should have failed"
+[[ "$msg" == *"Syntax:"* ]] || fatal "cleanup-usage: no syntax: $msg"
+msg=$("$BT/bin/rootfs-cleanup" "$tmp/no-such-root" 2>&1) && fatal "cleanup-missing: should have failed"
+[[ "$msg" == *"no such directory"* ]] || fatal "cleanup-missing: unexpected message: $msg"
+r=$tmp/cleanup
+populated_root "$r"
+"$BT/bin/rootfs-cleanup" "$r"
+assert_reset cleanup "$r"
+grep -q "^$r rm -rf .*/var/lib/apt/lists/\*" "$tmp/chroot.log" || fatal "cleanup: the chroot cleanup did not run"
+grep -qx -- "-k $r" "$tmp/fuser.log" || fatal "cleanup: fuser -k did not run"
+rm "$r/var/lib/dbus/machine-id"
+mkdir -p "$r/var/lib/dbus/machine-id/x"
+msg=$("$BT/bin/rootfs-cleanup" "$r" 2>&1) && fatal "cleanup-fail: should have failed"
+[[ "$msg" == *"cannot reset the machine-id of $r"* ]] || fatal "cleanup-fail: unexpected message: $msg"
+
+info "4: bin/iso-machine-id-check"
+check=$BT/bin/iso-machine-id-check
+msg=$("$check" 2>&1) && fatal "check-usage: should have failed"
+[[ "$msg" == *"Syntax:"* ]] || fatal "check-usage: no syntax: $msg"
+msg=$("$check" "$tmp/no-such.iso" 2>&1) && fatal "check-missing: should have failed"
+[[ "$msg" == *"no such file"* ]] || fatal "check-missing: unexpected message: $msg"
+r=$tmp/isoroot
+populated_root "$r"
+make_iso "$r" "$tmp/dirty.iso"
+msg=$("$check" "$tmp/dirty.iso" 2>&1) && fatal "check-dirty: an ISO with an id passed"
+[[ "$msg" == *"does not ship an empty machine-id"* ]] || fatal "check-dirty: unexpected message: $msg"
+[[ "$msg" == *"/etc/machine-id is a file holding '$OLD_ID'"* ]] || fatal "check-dirty: the id is not named: $msg"
+[[ "$msg" == *"/var/lib/dbus/machine-id is a file holding '$OLD_ID'"* ]] || fatal "check-dirty: the D-Bus copy is not named: $msg"
+rm "$r/var/lib/dbus/machine-id"
+make_iso "$r" "$tmp/id-only.iso"
+msg=$("$check" "$tmp/id-only.iso" 2>&1) && fatal "check-id-only: an ISO with an id passed"
+[[ "$msg" == *"/var/lib/dbus/machine-id is missing"* ]] || fatal "check-id-only: unexpected message: $msg"
+cp "$r/etc/machine-id" "$r/var/lib/dbus/machine-id"
+layer_reset_machine_id "$r"
+make_iso "$r" "$tmp/clean.iso"
+msg=$("$check" "$tmp/clean.iso" 2>&1) || fatal "check-clean: a clean ISO was refused: $msg"
+[[ "$msg" == *"empty /etc/machine-id"* ]] || fatal "check-clean: unexpected message: $msg"
+rm "$r/var/lib/dbus/machine-id"
+make_iso "$r" "$tmp/no-dbus.iso"
+"$check" "$tmp/no-dbus.iso" >/dev/null 2>&1 || fatal "check-no-dbus: an ISO without a D-Bus copy was refused"
+echo "$OLD_ID" > "$r/var/lib/dbus/machine-id"
+make_iso "$r" "$tmp/dbus-file.iso"
+msg=$("$check" "$tmp/dbus-file.iso" 2>&1) && fatal "check-dbus-file: should have failed"
+[[ "$msg" == *"/etc/machine-id is a file holding '',"* ]] || fatal "check-dbus-file: unexpected message: $msg"
+rm "$r/var/lib/dbus/machine-id"
+ln -s /var/lib/dbus/other "$r/var/lib/dbus/machine-id"
+rm "$r/etc/machine-id"
+make_iso "$r" "$tmp/no-id.iso"
+msg=$("$check" "$tmp/no-id.iso" 2>&1) && fatal "check-no-id: an ISO without a machine-id passed"
+[[ "$msg" == *"/etc/machine-id is missing"* ]] || fatal "check-no-id: unexpected message: $msg"
+[[ "$msg" == *"is a link to /var/lib/dbus/other"* ]] || fatal "check-no-id: the D-Bus link is not named: $msg"
+ln -s /run/machine-id "$r/etc/machine-id"
+make_iso "$r" "$tmp/link-id.iso"
+msg=$("$check" "$tmp/link-id.iso" 2>&1) && fatal "check-link: a symlinked machine-id passed"
+[[ "$msg" == *"/etc/machine-id is a link to /run/machine-id"* ]] || fatal "check-link: unexpected message: $msg"
+rm "$r/etc/machine-id"
+mkdir -p "$r/etc/machine-id/x"
+make_iso "$r" "$tmp/dir-id.iso"
+msg=$("$check" "$tmp/dir-id.iso" 2>&1) && fatal "check-dir: a directory at the machine-id passed"
+[[ "$msg" == *"/etc/machine-id is a directory"* ]] || fatal "check-dir: unexpected message: $msg"
+rm -r "$r/etc/machine-id"
+# the squashfs is copied out next to the ISO, never to /tmp, and removed
+! compgen -G "$tmp/.iso-machine-id-check.*" >/dev/null || fatal "check-work: a work directory was left next to the ISO"
+mkdir -p "$tmp/ro"
+cp "$tmp/clean.iso" "$tmp/ro/clean.iso"
+chmod 555 "$tmp/ro"
+msg=$("$check" "$tmp/ro/clean.iso" 2>&1) && fatal "check-ro: should have failed beside a read-only ISO"
+[[ "$msg" == *"cannot make a work directory next to"* ]] || fatal "check-ro: unexpected message: $msg"
+chmod 755 "$tmp/ro"
+# fab's layout is the default; another path is read when asked for
+rm -f "$r/etc/machine-id" "$r/var/lib/dbus/machine-id"
+layer_reset_machine_id "$r"
+make_iso "$r" "$tmp/elsewhere.iso" /casper/filesystem.squashfs
+msg=$("$check" "$tmp/elsewhere.iso" 2>&1) && fatal "check-no-squashfs: should have failed"
+[[ "$msg" == *"cannot read /live/10root.squashfs"* ]] || fatal "check-no-squashfs: unexpected message: $msg"
+ISO_SQUASHFS=/casper/filesystem.squashfs "$check" "$tmp/elsewhere.iso" >/dev/null 2>&1 \
+    || fatal "check-iso-squashfs: ISO_SQUASHFS was not read"
+# a file at the squashfs path that is not a squashfs
+mkdir -p "$tmp/badcd/live"
+echo "not a squashfs" > "$tmp/badcd/live/10root.squashfs"
+xorriso -as mkisofs -quiet -r -J -o "$tmp/bad.iso" "$tmp/badcd" >/dev/null 2>&1
+msg=$("$check" "$tmp/bad.iso" 2>&1) && fatal "check-bad-squashfs: should have failed"
+[[ "$msg" == *"cannot read the machine-id out of"* ]] || fatal "check-bad-squashfs: unexpected message: $msg"
+# a tool missing: PATH with everything but unsquashfs
+mkdir -p "$tmp/notools"
+for t in bash basename dirname readlink xorriso; do ln -s "$(command -v "$t")" "$tmp/notools/$t"; done
+msg=$(PATH=$tmp/notools "$check" "$tmp/clean.iso" 2>&1) && fatal "check-no-tool: should have failed"
+[[ "$msg" == *"unsquashfs not found"* ]] || fatal "check-no-tool: unexpected message: $msg"
+
+info "5: bt-iso (scratch copy with stubs)"
+sbt=$tmp/scratch-bt
+mkdir -p "$sbt/bin" "$sbt/config" "$tmp/isos"
+cp "$BT/bt-iso" "$sbt/bt-iso"
+for f in layer-lib reset-machine-id iso-machine-id-check; do
+    cp "$BT/bin/$f" "$sbt/bin/$f"
+done
+# iso-release copies the ISO where BT_ISOS says; the stub records that
+# shellcheck disable=SC2016  # the stub's own variables, expanded when it runs
+printf '#!/bin/bash\necho "$*" > "%s/iso-release.log"\ncp build/product.iso "${!#}/released.iso"\n' "$tmp" \
+    > "$sbt/bin/iso-release"
+chmod 755 "$sbt/bin/iso-release"
+cat > "$sbt/config/common.cfg" <<EOF
+export BT_PRODUCTS=$tmp/products
+export BT_ISOS=$tmp/isos
+export BT_BUILDS=$tmp/builds
+EOF
+git -C "$sbt" init -q
+git -C "$sbt" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m scratch
+# a product whose root.patched carries the bootstrap's id, as fab leaves it,
+# and whose ISO is squashed from root.patched, as fab does
+write_iso_product() {
+    local dir=$1
+    mkdir -p "$dir"
+    cat > "$dir/Makefile" <<EOF
+all: build/product.iso
+
+build/stamps/root.patched:
+	if [ -f FAIL ]; then exit 1; fi
+	mkdir -p build/stamps build/root.patched/etc build/root.patched/var/lib/dbus
+	echo $OLD_ID > build/root.patched/etc/machine-id
+	cp build/root.patched/etc/machine-id build/root.patched/var/lib/dbus/machine-id
+	touch \$@
+
+build/product.iso: build/stamps/root.patched
+	echo rebuilt >> build/root.patched.count
+	mkdir -p build/cdroot/live
+	mksquashfs build/root.patched build/cdroot/live/10root.squashfs -quiet -no-progress -noappend
+	xorriso -as mkisofs -quiet -r -J -o \$@ build/cdroot
+
+clean:
+	rm -rf build
+EOF
+}
+write_iso_product "$tmp/products/core"
+# no setup, no screenshots; DEBUG turns the missing TKLDev profile and
+# preseed into warnings
+export DEBUG=1
+unset BT_DEBUG
+(cd "$tmp" && "$sbt/bt-iso" -s -n core) > "$tmp/bt-iso.log" 2>&1 \
+    || { cat "$tmp/bt-iso.log"; fatal "bt-iso: the build failed"; }
+grep -q "empty /etc/machine-id" "$tmp/bt-iso.log" || fatal "bt-iso: the ISO was not checked"
+mkdir -p "$tmp/released"
+xorriso -osirrox on -indev "$tmp/isos/released.iso" \
+    -extract /live/10root.squashfs "$tmp/released/root.squashfs" >/dev/null 2>&1
+unsquashfs -q -n -d "$tmp/released/root" "$tmp/released/root.squashfs" >/dev/null
+assert_reset bt-iso "$tmp/released/root"
+# root.patched is built once, by the first make, and reused by the second
+assert_eq bt-iso-once "$(wc -l < "$tmp/products/core/build/root.patched.count")" 1
+# -u releases nothing that ships an id: an ISO made before this fix
+populated_root "$tmp/isoroot-old"
+make_iso "$tmp/isoroot-old" "$tmp/products/core/build/product.iso"
+rm -f "$tmp/iso-release.log"
+msg=$(cd "$tmp" && "$sbt/bt-iso" -s -u core 2>&1) && fatal "bt-iso-u: an ISO with an id was released"
+[[ "$msg" == *"ships a machine-id - rebuild it without -u"* ]] || fatal "bt-iso-u: unexpected message: $msg"
+[[ ! -e "$tmp/iso-release.log" ]] || fatal "bt-iso-u: iso-release ran"
+# a root.patched that fails stops the build before any ISO
+write_iso_product "$tmp/products/broken"
+touch "$tmp/products/broken/FAIL"
+msg=$(cd "$tmp" && "$sbt/bt-iso" -s -n broken 2>&1) && fatal "bt-iso-broken: should have failed"
+[[ "$msg" == *"Build failed..."* ]] || fatal "bt-iso-broken: unexpected message: $msg"
+[[ ! -e "$tmp/products/broken/build/product.iso" ]] || fatal "bt-iso-broken: an ISO was made"
+
+info "all machine-id tests passed"

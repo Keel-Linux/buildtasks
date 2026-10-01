@@ -11,3 +11,5 @@ jobs:
     uses: keel-linux/.github/.github/workflows/test-shell.yml@main
     with:
       threshold: 99
+      # tests/machine-id makes small ISOs, as fab does
+      apt-packages: squashfs-tools xorriso

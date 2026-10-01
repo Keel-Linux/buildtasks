@@ -579,13 +579,32 @@ layer_audit_keys() {
 #
 # /etc/machine-id is left an empty file, as Debian's cloud images ship it,
 # and systemd makes the id at each machine's boot. Not missing and not
-# "uninitialized": either makes that boot a first boot to systemd, which
-# presets every unit and undoes what the build enabled and masked
-# (machine-id(5), "First Boot Semantics"). D-Bus's copy becomes the link to
+# "uninitialized": either makes that boot a first boot to systemd, which runs
+# preset-all over every unit (machine-id(5), "First Boot Semantics"). Built
+# without first-boot-full-preset, as Debian 13's systemd 257 is (upstream
+# means to make it the default later, so check again on forky), that only
+# enables: every
+# unit a preset enables is enabled, including the ones the build disabled on
+# purpose, and nothing is disabled. D-Bus's copy becomes the link to
 # it that tmpfiles.d/dbus.conf makes when it is absent, because systemd reads
 # that file when /etc/machine-id is empty and would bring the old id back.
 LAYER_MACHINE_ID=etc/machine-id
 LAYER_DBUS_MACHINE_ID=var/lib/dbus/machine-id
+
+# layer_machine_id_is_reset ROOTFS: true when ROOTFS is in that state: an
+# empty /etc/machine-id that is a file of its own, and no D-Bus copy or the
+# link to it. What an image is checked against when it was not made here
+# (bin/iso-machine-id-check).
+layer_machine_id_is_reset() {
+    local rootfs=$1
+    local id=$rootfs/$LAYER_MACHINE_ID
+    local dbus=$rootfs/$LAYER_DBUS_MACHINE_ID
+    [[ -f "$id" && ! -L "$id" && ! -s "$id" ]] || return 1
+    if [[ -e "$dbus" || -L "$dbus" ]]; then
+        [[ -L "$dbus" && "$(readlink "$dbus")" == "/$LAYER_MACHINE_ID" ]] || return 1
+    fi
+    return 0
+}
 
 # A tree already in that state is not written, so a child layer does not
 # copy its parent's empty file up into its own tarball.

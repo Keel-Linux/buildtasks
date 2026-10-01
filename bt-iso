@@ -400,7 +400,22 @@ else
     info "Preparation done. Building appliance $appname."
     cd "$BT_PRODUCTS/$appname"
     product_build_clean
-    make 2>&1 | tee build/log || true
+    mkdir -p build
+    # root.patched first, so its machine-id is emptied before fab squashes it
+    # into the ISO (bin/reset-machine-id); the rest of the build then reuses
+    # it, since nothing it depends on has changed
+    make build/stamps/root.patched 2>&1 | tee build/log || true
+    if [[ -f build/stamps/root.patched ]]; then
+        # a root.sandbox left mounted on root.patched by an earlier run
+        # (DEBUG skips the clean) would be an overlay whose lower layer
+        # changes under it
+        deck -D build/root.sandbox 2>/dev/null || true
+        if ! "$BT/bin/reset-machine-id" build/root.patched; then
+            [[ -n "$BT_DEBUG" ]] || product_build_clean
+            fatal "cannot reset the machine-id of $appname"
+        fi
+        make 2>&1 | tee -a build/log || true
+    fi
 
     if [[ ! -e build/product.iso ]]; then
         if [[ -z "$BT_DEBUG" ]]; then
@@ -408,6 +423,16 @@ else
         fi
         fatal "Build failed..."
     fi
+fi
+
+# whether built here or reused with -u, an ISO that ships a machine-id is
+# not released, nor screenshot
+if ! "$BT/bin/iso-machine-id-check" build/product.iso; then
+    if [[ -n "$use_existing" ]]; then
+        fatal "build/product.iso ships a machine-id - rebuild it without -u"
+    fi
+    [[ -n "$BT_DEBUG" ]] || product_build_clean
+    fatal "build/product.iso ships a machine-id although root.patched was reset - a build step after it wrote one"
 fi
 
 if [[ -z "$no_screens" ]]; then
