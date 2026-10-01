@@ -17,7 +17,8 @@ CLEANUP='/boot/*.bak /var/log/dpkg.log /var/log/apt/* /var/lib/apt/lists/* /var/
 usage() {
 cat<<EOF
 Syntax: $APP rootfs-dir
-Cleans up logs, caches and leftover files in rootfs
+Cleans up logs, caches and leftover files in rootfs, and leaves it with an
+empty /etc/machine-id (bin/reset-machine-id)
 EOF
 exit 1
 }
@@ -30,3 +31,10 @@ rootfs=$1
 
 tklpatch-chroot "$rootfs" "rm -rf $CLEANUP"
 fuser -k "$rootfs" || true
+
+# Last, after every patch and package upgrade that ran in the chroot: the
+# rootfs comes from the ISO, and systemd's postinst writes a machine-id of
+# its own on every configure, so whatever ran since the ISO was made may
+# have left one that every machine made from this image would share.
+"$(dirname "$(readlink -f "$0")")/reset-machine-id" "$rootfs" \
+    || fatal "cannot reset the machine-id of $rootfs"

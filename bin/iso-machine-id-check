@@ -1,0 +1,89 @@
+#!/bin/bash -e
+# Copyright (c) 2026 KeelLinux
+#
+# This file is part of buildtasks.
+#
+# Buildtasks is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+
+# Refuses an ISO whose live root filesystem carries a machine-id. tkl-installer
+# unpacks that squashfs onto the disk as it is and makes no id of its own, so
+# an id in the ISO is the id of every machine installed from it, and of every
+# image bt-vm, bt-container and the others derive from it.
+#
+# Reads the squashfs out of the ISO with xorriso, which fab already needs to
+# write the ISO, and only the two files out of the squashfs.
+
+APP=$(basename "$0")
+fatal() { echo "FATAL [$APP]: $*" 1>&2; exit 1; }
+info() { echo "INFO [$APP]: $*"; }
+
+usage() {
+cat<<EOF
+Syntax: $APP iso
+Fails unless the ISO's live root filesystem has an empty /etc/machine-id and
+no /var/lib/dbus/machine-id other than the link to it
+
+Environment::
+
+    ISO_SQUASHFS        - path of the root squashfs inside the ISO
+                          (default: $ISO_SQUASHFS_DEFAULT)
+EOF
+exit 1
+}
+
+ISO_SQUASHFS_DEFAULT=/live/10root.squashfs
+ISO_SQUASHFS=${ISO_SQUASHFS:-$ISO_SQUASHFS_DEFAULT}
+
+if [[ "$#" != "1" ]]; then
+    usage
+fi
+iso=$1
+[[ -f "$iso" ]] || fatal "no such file: $iso"
+for tool in xorriso unsquashfs; do
+    command -v "$tool" >/dev/null || fatal "$tool not found"
+done
+
+# the library beside this script, whatever BT the caller exported
+# shellcheck source=bin/layer-lib
+source "$(dirname "$(readlink -f "$0")")/layer-lib"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+if ! xorriso -osirrox on -indev "$iso" -extract "$ISO_SQUASHFS" "$work/root.squashfs" \
+        >"$work/xorriso.log" 2>&1 || [[ ! -f "$work/root.squashfs" ]]; then
+    cat "$work/xorriso.log" >&2
+    fatal "cannot read $ISO_SQUASHFS out of $iso"
+fi
+# unsquashfs exits 0 when a named file is not in the image, so a missing
+# /etc/machine-id is told apart by the check below, not here
+if ! unsquashfs -q -n -d "$work/root" "$work/root.squashfs" \
+        "$LAYER_MACHINE_ID" "$LAYER_DBUS_MACHINE_ID" >"$work/unsquashfs.log" 2>&1; then
+    cat "$work/unsquashfs.log" >&2
+    fatal "cannot read the machine-id out of $ISO_SQUASHFS in $iso"
+fi
+if ! layer_machine_id_is_reset "$work/root"; then
+    id=$work/root/$LAYER_MACHINE_ID
+    dbus=$work/root/$LAYER_DBUS_MACHINE_ID
+    if [[ -L "$id" ]]; then
+        id_state="a link to $(readlink "$id")"
+    elif [[ -f "$id" ]]; then
+        id_state="'$(head -c 64 "$id")'"
+    else
+        id_state=missing
+    fi
+    if [[ -L "$dbus" ]]; then
+        dbus_state="a link to $(readlink "$dbus")"
+    elif [[ -e "$dbus" ]]; then
+        dbus_state="a file of its own, '$(head -c 64 "$dbus")'"
+    else
+        dbus_state=absent
+    fi
+    fatal "$iso does not ship an empty machine-id: every machine installed" \
+        "from it would share one. /$LAYER_MACHINE_ID is $id_state," \
+        "/$LAYER_DBUS_MACHINE_ID is $dbus_state"
+fi
+info "$iso: empty /$LAYER_MACHINE_ID, each machine makes its own"

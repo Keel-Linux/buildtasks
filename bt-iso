@@ -400,7 +400,16 @@ else
     info "Preparation done. Building appliance $appname."
     cd "$BT_PRODUCTS/$appname"
     product_build_clean
-    make 2>&1 | tee build/log || true
+    mkdir -p build
+    # root.patched first, so its machine-id is emptied before fab squashes it
+    # into the ISO (bin/reset-machine-id); the rest of the build then reuses
+    # it, since nothing it depends on has changed
+    make build/stamps/root.patched 2>&1 | tee build/log || true
+    if [[ -f build/stamps/root.patched ]]; then
+        "$BT/bin/reset-machine-id" build/root.patched \
+            || fatal "cannot reset the machine-id of $appname"
+        make 2>&1 | tee -a build/log || true
+    fi
 
     if [[ ! -e build/product.iso ]]; then
         if [[ -z "$BT_DEBUG" ]]; then
@@ -409,6 +418,11 @@ else
         fatal "Build failed..."
     fi
 fi
+
+# whether built here or reused with -u, an ISO that ships a machine-id is
+# not released, nor screenshot
+"$BT/bin/iso-machine-id-check" build/product.iso \
+    || fatal "build/product.iso ships a machine-id - rebuild it without -u"
 
 if [[ -z "$no_screens" ]]; then
     if [[ -n "$use_existing" ]]; then
