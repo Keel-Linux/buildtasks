@@ -1,0 +1,201 @@
+# Security scan baseline (keel-linux/.github, security-scan.yml): findings
+# that were read and are not a risk, one per line, the fingerprint and why.
+bandit:B103:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/25ec2-userdata:41b915760d64 0o750 on the root-owned user-data script inside root-only /var/lib/inithooks; group gets read and execute, nobody else anything
+semgrep:python.lang.security.audit.insecure-file-permissions.insecure-file-permissions:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/25ec2-userdata:41b915760d64 same line as bandit B103: 0o750 on a root-owned script, not world-accessible
+semgrep:python.lang.security.audit.insecure-file-permissions.insecure-file-permissions:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/40ec2-sshkeys:2a1bfb391576 0o700 on the user's ~/.ssh, the permission sshd requires
+shellcheck:SC1087:bt-img:bd6307f51502 shell lint, not a security risk: braces around an array expansion
+shellcheck:SC1090:bin/signature-verify:c49d7954adcf shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC1090:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/70ec2-log-rootpass:c57db62f520d shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC1090:patches/docker/overlay/usr/lib/inithooks/firstboot.d/70logger:c57db62f520d shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC1090:patches/ec2/overlay/usr/lib/inithooks/everyboot.d/98finalize:125a7d718d34 shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC1090:patches/ec2/overlay/usr/lib/inithooks/firstboot.d/97tklbam-restore:c57db62f520d shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC1090:patches/xen/overlay/usr/lib/inithooks/firstboot.d/30rootpass:c57db62f520d shell lint, not a security risk: a sourced file whose path is computed, shellcheck cannot follow it
+shellcheck:SC2034:bin/aplinfo-lib:07167ec2935e shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/aplinfo-lib:3c86f57fc01c shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/aplinfo-lib:da45f96709c9 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/aplinfo-lib:f1a284a2948e shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/aplinfo-lib:f251f2d37388 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/docker-setup:1880791abf79 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/img-publish:6f7887cbf30c shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/img-publish:f341c2803485 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/iso-publish:6f7887cbf30c shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/iso-publish:f341c2803485 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/layer-lib:3a1046c0a1ff shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/layer-lib:4ea1d4082dc3 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/layer-lib:53011f34af5b shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/layer-lib:7e23d6f3f82e shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bin/vm-bundle:3837e0b3e504 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bt-img:b6fadcd46794 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bt-optimized:7fa1e9987f85 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:bt-qemu-docker:790f19c9cc7b shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:282d3397ec89 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:4918c6c55324 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:50c2dcf4b28e shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:55ad7f446310 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:58104a2b24b6 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:aabd92267b69 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:b6ec5ebcb8d6 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:282d3397ec89 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:50c2dcf4b28e shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:55ad7f446310 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:58104a2b24b6 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:aabd92267b69 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2034:patches/xen/overlay/etc/grub.d/40_custom:b6ec5ebcb8d6 shell lint, not a security risk: a variable read by a sourcing script or left unused
+shellcheck:SC2046:bin/clean:c3863a5d9b7a shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bin/docker-setup:a01f6f1e7db3 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bin/img-publish:a01f6f1e7db3 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bin/img-release:a01f6f1e7db3 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bin/img-verify:a01f6f1e7db3 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bin/iso-publish:a01f6f1e7db3 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-container:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-container:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-docker:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-docker:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:21269a1046ad shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:3dc0e7169ea7 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:78d29df9c466 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:81682c554a13 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:9bbd899eb3e2 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:a2395df0c236 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-img:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-iso-patched:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-openstack-ami:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-openstack-ami:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-openstack:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-openstack:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-optimized:dc88d925387f shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-otc:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-otc:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-prepqemu:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-qemu-docker:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-vm:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-vm:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-xen:c9306030a086 shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2046:bt-xen:db221bf6bddb shell lint, not a security risk: unquoted command substitution over values the script itself produces
+shellcheck:SC2060:bt-img:d5bac47ddf40 shell lint, not a security risk: unquoted tr ranges, a glob match is only possible with odd files in the cwd
+shellcheck:SC2060:bt-vm:8f5ebd12123b shell lint, not a security risk: unquoted tr ranges, a glob match is only possible with odd files in the cwd
+shellcheck:SC2060:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/70ec2-log-rootpass:b06431811a14 shell lint, not a security risk: unquoted tr ranges, a glob match is only possible with odd files in the cwd
+shellcheck:SC2068:bin/generate-release-deb:b74b40480442 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:bin/vm-setup:70cb192cd228 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:bin/vm-setup:f3bcb6e24c7e shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:patches/ec2/conf:dcff75e06235 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:patches/openstack-ami/conf:dcff75e06235 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:patches/openstack/conf:dcff75e06235 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:patches/otc/conf:dcff75e06235 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2068:patches/vm/conf:dcff75e06235 shell lint, not a security risk: unquoted array expansion of the script's own arguments
+shellcheck:SC2071:bin/img-publish:d93f44022510 shell lint, not a security risk: string comparison of numbers, a correctness defect
+shellcheck:SC2089:bin/vm-setup:e9b1664fbdb6 shell lint, not a security risk: quotes in a variable meant literally
+shellcheck:SC2090:bin/vm-setup:5d710b4c4447 shell lint, not a security risk: quotes in a variable meant literally
+shellcheck:SC2115:bin/clean:eb8a7d78aee5 shell lint, not a security risk: rm -rf of a path built from variables the build sets, never empty in practice
+shellcheck:SC2124:bin/docker-bundle:f1896d6563da shell lint, not a security risk: array assigned to a string
+shellcheck:SC2124:bin/docker-qemu-bundle:f1896d6563da shell lint, not a security risk: array assigned to a string
+shellcheck:SC2128:bt-img:5d188a0067df shell lint, not a security risk: array expanded without index, a correctness defect
+shellcheck:SC2144:bin/generate-app-patch:eec7179fe52e shell lint, not a security risk: -e on a glob
+shellcheck:SC2144:bin/img-publish:f700213703e5 shell lint, not a security risk: -e on a glob
+shellcheck:SC2145:bin/clean:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/clean:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/clean:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-bundle:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-bundle:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-qemu-bundle:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-qemu-bundle:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-setup:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-setup:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/docker-setup:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/generate-app-patch:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/generate-app-patch:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/generate-opennode-ovf:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/generate-opennode-ovf:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-download:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-download:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-publish:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-publish:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-publish:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-release:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-release:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-release:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-verify:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/img-verify:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/iso-publish:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/iso-publish:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/iso-publish:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-bundle-ami:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-bundle-ami:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-bundle:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-bundle:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-bundle:f910546c40b9 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-setup:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-setup:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/openstack-setup:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/parse-appname-version:3a5343a951ec shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/parse-appname-version:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/signature-sign:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/signature-sign:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/update-pkgs:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/update-pkgs:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-bundle:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-bundle:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-bundle:f910546c40b9 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-setup:0f907319812b shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-setup:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-setup:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bin/vm-setup:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-container:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-container:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-container:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-docker:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-docker:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-docker:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-img:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-img:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-img:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-iso-patched:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-iso-patched:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-iso-patched:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack-ami:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack-ami:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack-ami:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-openstack:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-optimized:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-optimized:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-optimized:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-otc:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-otc:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-otc:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-prepqemu:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-prepqemu:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-prepqemu:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-qemu-docker:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-qemu-docker:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-qemu-docker:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-vm:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-vm:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-vm:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-xen:3142703367d7 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-xen:4f68f312bfba shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:bt-xen:dbc89fa7722c shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2145:patches/vm/conf:4807348886d3 shell lint, not a security risk: "$@" mixed into a message string, affects only log text
+shellcheck:SC2155:bin/docker-setup:a01f6f1e7db3 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bin/img-publish:a01f6f1e7db3 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bin/img-release:a01f6f1e7db3 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bin/img-verify:a01f6f1e7db3 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bin/iso-publish:a01f6f1e7db3 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-container:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-docker:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-img:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-iso-patched:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-openstack-ami:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-openstack:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-otc:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-prepqemu:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-qemu-docker:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-vm:8f5ebd12123b shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-vm:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2155:bt-xen:c9306030a086 shell lint, not a security risk: declare and assign together masks a return value
+shellcheck:SC2157:bin/openstack-bundle:36ea09179921 shell lint, not a security risk: always-true test, a correctness defect (cleanup never runs), not a risk
+shellcheck:SC2209:patches/cloud/overlay/usr/lib/inithooks/firstboot.d/70ec2-log-rootpass:b06431811a14 shell lint, not a security risk: assigns a literal word, as intended
+shellcheck:SC2210:patches/vm/conf:4807348886d3 shell lint, not a security risk: redirection to a number
+shellcheck:SC3037:patches/ec2-pvmshim/overlay/etc/grub.d/40_custom:46b7df4a1913 shell lint, not a security risk: echo flags in sh
+shellcheck:SC3037:patches/xen/overlay/etc/grub.d/40_custom:46b7df4a1913 shell lint, not a security risk: echo flags in sh

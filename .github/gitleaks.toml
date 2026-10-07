@@ -1,0 +1,14 @@
+# gitleaks (keel-linux/.github, security-scan.yml): the default rules, less
+# the test files below. tests/layer writes truncated fake key headers
+# ("MIIE", "b3Bl", "lQ") to check that a layer refuses private keys;
+# tests/ec2-v19 named the public fingerprints of the TurnKey signing keys.
+# A new fixture is added here by path once it has been read.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "test fixtures, fake or public on purpose"
+paths = [
+  '''^tests/layer$''',
+  '''^tests/ec2-v19$''',
+]
