@@ -1,0 +1,10 @@
+# gitleaks false positives, by fingerprint. Each was read; none is a secret.
+# BT_GPGKEY / GPGKEY: fingerprints of the public TurnKey release signing keys
+# (2020-2026), which identify a key and grant nothing.
+3cce40d3bbc0e7a6d5ef847a5137d83476c7cbcb:config.example/common.cfg:generic-api-key:5
+485fa7687e2c8943863c2895aea12b58b89434c0:config.example/common.cfg:generic-api-key:5
+4cefac305b8ec8fe374c105eaad22036f2e4e7f5:bt-iso:generic-api-key:113
+626f9e8d5af2525d2f1064c52b31c3440383b718:config.example/common.cfg:generic-api-key:7
+8ed92a334635c9090e249ae715658a35ad15ec67:bt-iso:generic-api-key:65
+988cf8990d80b7e66900dfadc4522b9470253492:config.example/common.cfg:generic-api-key:5
+c3ee5717d3308748006e06cae1b027e46e1981ee:bt-img:generic-api-key:120
