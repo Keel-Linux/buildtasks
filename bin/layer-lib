@@ -469,16 +469,168 @@ layer_tar_flags() {
     done
 }
 
+# layer_is_whiteout PATH: an overlayfs whiteout, a character device 0:0.
+layer_is_whiteout() {
+    [[ -c "$1" && ! -L "$1" ]] && [[ "$(stat -c '%t:%T' "$1")" == 0:0 ]]
+}
+
+# layer_is_opaque PATH: a directory overlayfs marks opaque, which hides
+# every entry of the lower directory. Status 0 opaque, 1 not, 2 the mark
+# could not be read: getfattr (package attr) missing or failing is an error
+# and never reads as "not opaque", or a directory that hid its parent's
+# files would let them back into the image. Reading trusted.* needs root,
+# which bt-layer has.
+layer_is_opaque() {
+    local path=$1
+    local out rc=0
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    local getfattr=${LAYER_GETFATTR:-getfattr}
+    out=$(LC_ALL=C "$getfattr" --absolute-names --only-values -n trusted.overlay.opaque -- "$path" 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        [[ "$out" == y ]]
+        return
+    fi
+    [[ $rc -eq 1 && "$out" == *"No such attribute"* ]] && return 1
+    layer_error "cannot read the overlay opaque mark of $path (status $rc): $out"
+    return 2
+}
+
+# layer_exists PATH: there is an entry at PATH, a dangling symlink included.
+layer_exists() {
+    [[ -e "$1" || -L "$1" ]]
+}
+
+# layer_real_dir_in ROOT REL: every component of REL under ROOT is a
+# directory and none is a symlink. A tree's absolute symlinks point at the
+# build host, so a test that follows one answers for the host, not the tree.
+layer_real_dir_in() {
+    local path=$1
+    local rel=${2#./}
+    local part
+    [[ "$rel" == . ]] && rel=
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    while [[ -n "$rel" ]]; do
+        part=${rel%%/*}
+        path+=/$part
+        [[ -d "$path" && ! -L "$path" ]] || return 1
+        if [[ "$rel" == */* ]]; then rel=${rel#*/}; else rel=; fi
+    done
+}
+
+# layer_exists_in ROOT REL: ROOT/REL is an entry of the tree under ROOT, a
+# dangling symlink included, reached without following a symlink on the way
+# (a later stage that replaced a directory with a link leaves the earlier
+# stage's files under it unreachable, not present).
+layer_exists_in() {
+    local root=$1
+    local rel=${2#./}
+    [[ "$rel" == . || -z "$rel" ]] && { layer_real_dir_in "$root" .; return; }
+    if [[ "$rel" == */* ]]; then
+        layer_real_dir_in "$root" "${rel%/*}" || return 1
+    else
+        layer_real_dir_in "$root" . || return 1
+    fi
+    layer_exists "$root/$rel"
+}
+
+# layer_delta_lists BUILD_DIR PARENT_ROOTFS LISTS: the members of a delta
+# layer, as NUL separated lists under LISTS, computed from the final tree and
+# the parent rather than taken from the deck's upper directories as they
+# are.
+#
+# Both stages of a build write an upper directory: root.build (the packages)
+# and root.patched (overlays, conf scripts, removelists). A file the first
+# stage created and the second deleted is in root.build's upper with its
+# content and in root.patched's as a whiteout; packing both uppers shipped
+# the content and then the whiteout, so the tree a layer unpacks to was
+# right and the bytes were still in the tarball (the snakeoil key ssl-cert
+# makes, which removelists-final takes out). So:
+#
+#   present         every path either upper holds that the final tree,
+#                   root.patched, still has, packed from root.patched
+#   whiteouts.STAGE a whiteout of that stage for a path the parent has and
+#                   the final tree does not, packed from that upper (a
+#                   whiteout for a path the parent never had hides nothing
+#                   and is dropped, and with it everything the layer made
+#                   and removed again)
+#   opaque.STAGE    a directory of that stage marked opaque over a
+#                   directory of the parent, packed from that upper so the
+#                   mark is kept; root.patched's wins over root.build's
+#
+# The lists are sorted, so the tarball does not depend on find's order.
+layer_delta_lists() {
+    local build_dir=$1
+    local parent=$2
+    local lists=$3
+    local merged=$build_dir/root.patched
+    local stage upper rel opaque
+    [[ -d "$merged" ]] || { layer_error "no final tree at $merged"; return 1; }
+    [[ -d "$parent" ]] || { layer_error "no parent tree at $parent"; return 1; }
+    if ! command -v "${LAYER_GETFATTR:-getfattr}" >/dev/null; then
+        layer_error "getfattr (package attr) not available, cannot tell opaque directories"
+        return 1
+    fi
+    mkdir -p "$lists"
+    : > "$lists/present.unsorted"
+    for stage in root.build root.patched; do
+        upper=$build_dir/.deck/$stage/upper
+        [[ -d "$upper" ]] || { layer_error "no upper directory at $upper"; return 1; }
+        : > "$lists/whiteouts.$stage"
+        : > "$lists/opaque.$stage"
+        (cd "$upper" && find . -print0) > "$lists/found.$stage"
+        while IFS= read -r -d '' rel; do
+            if layer_is_whiteout "$upper/$rel"; then
+                layer_exists_in "$merged" "$rel" && continue
+                layer_exists_in "$parent" "$rel" || continue
+                printf '%s\0' "$rel" >> "$lists/whiteouts.$stage"
+            elif layer_exists_in "$merged" "$rel"; then
+                opaque=0
+                layer_is_opaque "$upper/$rel" || opaque=$?
+                [[ $opaque -lt 2 ]] || return 1
+                if [[ $opaque -eq 0 ]] && layer_real_dir_in "$parent" "$rel"; then
+                    printf '%s\0' "$rel" >> "$lists/opaque.$stage"
+                else
+                    printf '%s\0' "$rel" >> "$lists/present.unsorted"
+                fi
+            fi
+        done < "$lists/found.$stage"
+        rm -f "$lists/found.$stage"
+    done
+    # a path the later stage also covers is that stage's alone
+    for stage in whiteouts opaque; do
+        LC_ALL=C sort -zu "$lists/$stage.root.patched" -o "$lists/$stage.root.patched"
+        LC_ALL=C sort -zu "$lists/$stage.root.build" \
+            | LC_ALL=C comm -z -23 - "$lists/$stage.root.patched" > "$lists/$stage.root.build.only"
+        mv "$lists/$stage.root.build.only" "$lists/$stage.root.build"
+    done
+    LC_ALL=C sort -zu "$lists/present.unsorted" \
+        | LC_ALL=C comm -z -23 - <(LC_ALL=C sort -zu "$lists/opaque.root.build" "$lists/opaque.root.patched") \
+        > "$lists/present"
+    rm -f "$lists/present.unsorted"
+}
+
+# layer_tar_members KIND BUILD_DIR [PARENT_ROOTFS LISTS_DIR]: the tar
+# arguments that name a layer's members. A rootfs layer is the whole final
+# tree; a delta layer is its diff against the parent (layer_delta_lists).
 layer_tar_members() {
     local kind=$1
     local build_dir=$2
+    local parent=${3:-}
+    local lists=${4:-}
+    local stage
     case $kind in
         rootfs)
             printf '%s\n' -C "$build_dir/root.patched" .
             ;;
         delta)
-            printf '%s\n' -C "$build_dir/.deck/root.build/upper" .
-            printf '%s\n' -C "$build_dir/.deck/root.patched/upper" .
+            [[ -n "$parent" && -n "$lists" ]] \
+                || { layer_error "a delta layer needs the parent tree and a directory for its lists"; return 1; }
+            layer_delta_lists "$build_dir" "$parent" "$lists" || return 1
+            printf '%s\n' --null --no-recursion -C "$build_dir/root.patched" -T "$lists/present"
+            for stage in root.build root.patched; do
+                printf '%s\n' -C "$build_dir/.deck/$stage/upper" \
+                    -T "$lists/opaque.$stage" -T "$lists/whiteouts.$stage"
+            done
             ;;
         *)
             layer_error "unknown layer kind '$kind'"

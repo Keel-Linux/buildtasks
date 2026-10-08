@@ -50,8 +50,11 @@ Environment::
 
 Output, in \$BT_BUILDS/layers/::
 
-    layer.tar.zst           full rootfs without --parent, the root.build and
-                            root.patched deck upper directories with --parent
+    layer.tar.zst           full rootfs without --parent; with --parent, the
+                            final tree's diff against the parent: what the
+                            build added or changed, and a whiteout for what
+                            it removed of the parent (nothing for a file
+                            the build created and removed again)
     layer.tar.zst.sha256    sha256sum of the tarball
     layer.manifest          plain text, one "key value" per line; "units"
                             lists every component this layer carries as a fab
@@ -195,7 +198,11 @@ rsync -aHAX --delete "$build_dir/root.patched/" "$rootfs_copy/"
 
 tarball=$layers_dir/$layer.tar.zst
 mapfile -t tar_flags < <(layer_tar_flags "$SOURCE_DATE_EPOCH")
-mapfile -t tar_members < <(layer_tar_members "$kind" "$build_dir")
+tar_lists=$build_dir/.layer-members
+rm -rf "$tar_lists"
+mapfile -t tar_members < <(layer_tar_members "$kind" "$build_dir" "$layers_dir/${parent:-none}.rootfs" "$tar_lists") \
+    || fatal "cannot list the members of $layer"
+[[ ${#tar_members[@]} -gt 0 ]] || fatal "cannot list the members of $layer"
 info "packing $kind layer $layer into $tarball"
 started=$(date +%s)
 tar "${tar_flags[@]}" -cf - "${tar_members[@]}" \

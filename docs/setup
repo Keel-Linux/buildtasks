@@ -36,6 +36,11 @@ bt-docker ::
 
     apt-get install aufs-tools
 
+bt-layer ::
+
+    # getfattr reads the overlayfs opaque marks; bt-layer stops without it
+    apt-get install zstd attr
+
 bt-xen ::
 
     apt-get install bzip2
