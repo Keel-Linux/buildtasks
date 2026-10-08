@@ -36,6 +36,11 @@ LAYER_SUBMOUNTS="run dev/pts dev proc sys"
 
 LAYER_ZSTD_LEVEL=19
 
+# The boot layer of an appliance (handbook decision 0052) is named after it
+# with this suffix: the kernel, initrd, bootloaders and installer the ISO
+# boots with and the container template never carries.
+LAYER_BOOT_SUFFIX=-boot
+
 # A unit is a component supplied to fab as a directory under the product's
 # UNIT_DIRS, carrying any of these four inputs. fab resolves the plan, applies
 # the overlay, runs the conf script and applies the removelist.
@@ -852,10 +857,15 @@ layer_parent_resolve() {
     layer_manifest_get "$manifest" sha256
 }
 
+# layer_parse_args ARGS...: sets LAYER_NAME, LAYER_PARENT, LAYER_USE_EXISTING,
+# LAYER_BOOT and LAYER_HELP, or LAYER_ERROR and returns 1. With --boot the
+# name given is the appliance: the layer is APPLIANCE-boot and its parent is
+# the appliance's layer (handbook decision 0052).
 layer_parse_args() {
     LAYER_NAME=
     LAYER_PARENT=
     LAYER_USE_EXISTING=
+    LAYER_BOOT=
     LAYER_HELP=
     LAYER_ERROR=
     while [[ $# -gt 0 ]]; do
@@ -874,6 +884,9 @@ layer_parse_args() {
                 ;;
             --use-existing|-u)
                 LAYER_USE_EXISTING=yes
+                ;;
+            --boot|-b)
+                LAYER_BOOT=yes
                 ;;
             -*)
                 LAYER_ERROR="unrecognized option: $1"
@@ -896,6 +909,15 @@ layer_parse_args() {
     if [[ "$LAYER_NAME" == "$LAYER_PARENT" ]]; then
         LAYER_ERROR="a layer cannot be its own parent"
         return 1
+    fi
+    if [[ -n "$LAYER_BOOT" ]]; then
+        if [[ -n "$LAYER_PARENT" ]]; then
+            # shellcheck disable=SC2034  # read by bt-layer: usage "$LAYER_ERROR"
+            LAYER_ERROR="--boot builds on the appliance it names; it takes no --parent"
+            return 1
+        fi
+        LAYER_PARENT=$LAYER_NAME
+        LAYER_NAME=$LAYER_NAME$LAYER_BOOT_SUFFIX
     fi
     return 0
 }

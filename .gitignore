@@ -2,3 +2,4 @@
 config
 logs/*
 tmp/*
+products/boot/build/

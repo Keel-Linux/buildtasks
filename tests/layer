@@ -46,7 +46,8 @@
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
 #     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
 #     layer_parse_args (help, name, parent, use-existing, no name, two
-#     names, unknown option, parent without value, self parent).
+#     names, unknown option, parent without value, self parent, --boot,
+#     --boot with --parent).
 #   bt-layer: --help; usage error; missing config; missing FAB_PATH; missing
 #     product; bad epoch; rootfs build with warning on BT_GPGKEY, exported
 #     with an empty machine-id whatever the build left, refused when it
@@ -57,7 +58,9 @@
 #     stale altstrap symlink; parent manifest without conf list; product
 #     without a debug target; failing make removes the altstrap; TERM default;
 #     a rootfs layer with a unit; a child that composes the same unit; a child
-#     that adds one; a child with no unit of its own; a unit pinned to another
+#     that adds one; a child with no unit of its own; --boot (the boot layer
+#     on the appliance's, its product missing, with --parent; products/boot's
+#     conf and overlays); a unit pinned to another
 #     version than the parent applied; a unit whose conf fab would skip; a
 #     parent manifest written before the units field existed.
 
@@ -753,7 +756,11 @@ layer_parse_args -u lamp --parent core
 assert_eq parse-parent "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "lamp|core|yes"
 layer_parse_args wordpress -p lamp --use-existing
 assert_eq parse-short "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "wordpress|lamp|yes"
-for bad in "" "a b" "--bogus a" "a --parent" "a --parent a"; do
+layer_parse_args --boot core
+assert_eq parse-boot "$LAYER_NAME|$LAYER_PARENT|$LAYER_BOOT" "core-boot|core|yes"
+layer_parse_args -u -b web
+assert_eq parse-boot-short "$LAYER_NAME|$LAYER_PARENT|$LAYER_USE_EXISTING" "web-boot|web|yes"
+for bad in "" "a b" "--bogus a" "a --parent" "a --parent a" "a --boot --parent b"; do
     if layer_parse_args $bad 2>/dev/null; then
         fatal "parse_args should have failed on '$bad'"
     fi
@@ -968,6 +975,40 @@ assert_eq app5-units "$(layer_manifest_get "$L/app5.manifest" units)" "broken@1.
 assert_eq app5-build-units "$(layer_manifest_get "$L/app5.manifest" build_units)" \
     "broken@1.0"
 assert_eq app5-units-used "$(cat "$tmp/products/app5/build/units.used")" "unit.d/broken"
+
+info "23: bt-layer --boot core (the boot layer of decision 0052)"
+# the product bt-layer --boot builds, here a stub; the real one is checked
+# below against a stand-in for common's turnkey.mk
+write_product "$tmp/products/bootprod" "turnkey.d keel-boot" "turnkey.d keel-boot"
+expect_fail boot-default-product-missing "$sbt/bt-layer" --boot core
+out=$(BT_BOOT_PRODUCT=$tmp/products/bootprod "$sbt/bt-layer" --boot core)
+assert_file "$L/core-boot.tar.zst"
+assert_eq boot-type "$(layer_manifest_get "$L/core-boot.manifest" type)" delta
+assert_eq boot-parent "$(layer_manifest_get "$L/core-boot.manifest" parent)" core
+assert_eq boot-parent-sha "$(layer_manifest_get "$L/core-boot.manifest" parent_sha256)" \
+    "$(layer_manifest_get "$L/core.manifest" sha256)"
+assert_eq boot-build-conf "$(layer_manifest_get "$L/core-boot.manifest" build_conf)" \
+    "turnkey.d/hostname keel-boot"
+assert_eq boot-build-overlays "$(layer_manifest_get "$L/core-boot.manifest" build_overlays)" \
+    "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot keel-boot"
+assert_eq boot-altstrap-used "$(cat "$tmp/products/bootprod/build/altstrap.used")" "$L/core.rootfs"
+expect_fail boot-with-parent "$sbt/bt-layer" --boot core --parent lamp
+
+info "23a: products/boot asks for keel-boot on top of turnkey.d"
+mkdir -p "$tmp/fabstub/common/mk"
+cat > "$tmp/fabstub/common/mk/turnkey.mk" <<'MK'
+COMMON_OVERLAYS := turnkey.d $(COMMON_OVERLAYS)
+COMMON_CONF := turnkey.d $(COMMON_CONF)
+debug:
+	$(foreach v,$(V),$(warning $(v) = $($(v))))
+	@true
+MK
+cp -r "$BT/products/boot" "$tmp/bootcopy"
+assert_eq boot-product-conf "$(FAB_PATH=$tmp/fabstub layer_make_var "$tmp/bootcopy" COMMON_CONF)" \
+    "turnkey.d keel-boot"
+assert_eq boot-product-overlays "$(FAB_PATH=$tmp/fabstub layer_make_var "$tmp/bootcopy" COMMON_OVERLAYS)" \
+    "turnkey.d keel-boot"
+grep -qx '#include <keel-boot>' "$tmp/bootcopy/plan/main" || fatal "products/boot does not resolve plans/keel-boot"
 
 echo
 info "all tests passed"
