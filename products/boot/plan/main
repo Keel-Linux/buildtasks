@@ -1,0 +1,2 @@
+/* the boot layer: plans/keel-boot of common (handbook decision 0052) */
+#include <keel-boot>

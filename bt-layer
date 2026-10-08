@@ -19,6 +19,7 @@ info() { echo "INFO [$APP]: $*"; }
 usage() {
     cat<<EOF
 Syntax: $APP [-p|--parent LAYER] [-u] layer
+        $APP -b|--boot [-u] appliance
 Builds product \$BT_PRODUCTS/layer to root.patched and exports it as a layer
 
 Arguments::
@@ -35,6 +36,12 @@ Options::
                           needs
     -u|--use-existing   - skip the build and export the existing
                           build/root.patched (fails if it is missing)
+    -b|--boot           - build the boot layer of the appliance: the layer
+                          appliance-boot on top of the appliance's layer,
+                          from the boot product (\$BT_BOOT_PRODUCT, default
+                          products/boot here), with the kernel, initrd,
+                          bootloaders and installer only the ISO uses
+                          (handbook decision 0052)
 
 Environment::
 
@@ -47,6 +54,8 @@ Environment::
     FAB_PATH            - fab tree (common/, altstraps/)
     RELEASE, FAB_ARCH   - default to the host release and architecture
     BT_DEBUG            - verbose output
+    BT_BOOT_PRODUCT     - the product --boot builds; defaults to products/boot
+                          in this checkout
 
 Output, in \$BT_BUILDS/layers/::
 
@@ -93,6 +102,9 @@ parent=$LAYER_PARENT
 [[ -n "$BT_PRODUCTS" ]] || fatal "BT_PRODUCTS not set"
 [[ -n "$BT_BUILDS" ]] || fatal "BT_BUILDS not set"
 product_dir=$BT_PRODUCTS/$layer
+if [[ -n "$LAYER_BOOT" ]]; then
+    product_dir=${BT_BOOT_PRODUCT:-$BT/products/boot}
+fi
 [[ -f "$product_dir/Makefile" ]] || fatal "product not found: $product_dir"
 
 RELEASE=${RELEASE:-debian/$(lsb_release -sc)}
