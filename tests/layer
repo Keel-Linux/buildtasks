@@ -22,7 +22,13 @@
 #     layer_unit_paths (none, two); layer_manifest_render (ok, odd args,
 #     bad key); layer_manifest_get (ok, missing file, missing key);
 #     layer_manifest_opt (present, absent, missing file);
-#     layer_tar_flags; layer_tar_members (rootfs, delta, unknown);
+#     layer_tar_flags; layer_tar_members (rootfs, delta without a parent,
+#     unknown); layer_delta_lists (a key created and removed leaves no byte, a
+#     parent file removed is a whiteout, a file re-created is packed once, an
+#     opaque directory comes from its upper, no final tree, no parent, no
+#     upper, no getfattr, getfattr failing, no test follows a symlink); layer_is_whiteout;
+#     layer_is_opaque (set, unset, getfattr failing, missing, a file);
+#     layer_exists; layer_real_dir_in; layer_exists_in;
 #     layer_audit_packages (clean, unconfigured package);
 #     layer_audit_keys (clean, no list, no root, a PKCS#8 key named by its
 #     image path, an OpenPGP secret key and not a public one,
@@ -77,6 +83,15 @@ export BT
 source "$BT/bin/layer-lib"
 
 tmp=$(mktemp -d)
+# bt-layer reads overlayfs opaque marks with getfattr, which CI installs
+# (package attr). Unprivileged on fake trees it finds no mark; a host without
+# it gets a stand-in that answers the same, so the run does not depend on it.
+if ! command -v getfattr >/dev/null; then
+    mkdir -p "$tmp/no-attr-bin"
+    printf '#!/bin/sh\necho "No such attribute" >&2; exit 1\n' > "$tmp/no-attr-bin/getfattr"
+    chmod +x "$tmp/no-attr-bin/getfattr"
+    export LAYER_GETFATTR=$tmp/no-attr-bin/getfattr
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 expect_fail() {
@@ -142,6 +157,11 @@ build/stamps/root.patched:
 	echo deb > build/.deck/root.build/upper/var/cache/apt/archives/x.deb
 	echo bin > build/.deck/root.build/upper/var/cache/apt/pkgcache.bin
 	echo conf > build/.deck/root.patched/upper/etc/x.conf
+	mkdir -p build/root.patched/usr/lib build/root.patched/var/cache/apt/archives/partial
+	cp build/.deck/root.build/upper/usr/lib/x.so build/root.patched/usr/lib/x.so
+	cp build/.deck/root.build/upper/var/cache/apt/archives/x.deb build/root.patched/var/cache/apt/archives/x.deb
+	cp build/.deck/root.build/upper/var/cache/apt/pkgcache.bin build/root.patched/var/cache/apt/pkgcache.bin
+	cp build/.deck/root.patched/upper/etc/x.conf build/root.patched/etc/x.conf
 	echo "\$(COMMON_OVERLAYS)" > build/overlays.used
 	echo "\$(COMMON_CONF)" > build/conf.used
 	echo "\$(UNITS)" > build/units.used
@@ -370,9 +390,131 @@ for want in --sort=name --mtime=@1700000000 --numeric-owner --xattrs \
     grep -qxF -- "$want" <<<"$flags" || fatal "tar flag missing: $want"
 done
 assert_eq members-rootfs "$(layer_tar_members rootfs /b | tr '\n' ' ')" "-C /b/root.patched . "
-assert_eq members-delta "$(layer_tar_members delta /b | tr '\n' ' ')" \
-    "-C /b/.deck/root.build/upper . -C /b/.deck/root.patched/upper . "
+expect_fail members-delta-noparent layer_tar_members delta /b
 expect_fail members-unknown layer_tar_members squashfs /b
+
+info "10a: delta members are the final tree's diff against the parent"
+# A layer build has two stages, each with its own upper directory. A file the
+# first creates and the second deletes is content in one and a whiteout in the
+# other; it must leave nothing in the tarball. Whiteouts are character devices
+# 0:0, which only root can make, so the test marks its stand-ins by name and
+# redefines the predicate; the real one is asserted on real files below.
+d=$tmp/delta
+parent=$d/parent
+# getfattr stand-ins: the lists need one, the predicate is redefined anyway
+mkdir -p "$d"
+gf=$d/getfattr-stub
+opaque_rc() { local rc=0; LAYER_GETFATTR=$1 layer_is_opaque "$2" 2>/dev/null || rc=$?; echo "$rc"; }
+printf '#!/bin/sh\nprintf y\n' > "$gf.set"
+printf '#!/bin/sh\necho "$5: No such attribute" >&2; exit 1\n' > "$gf.unset"
+printf '#!/bin/sh\necho "$5: Operation not supported" >&2; exit 1\n' > "$gf.fails"
+chmod +x "$gf".*
+mkdir -p "$d/b/root.patched" "$d/b/.deck/root.build/upper" "$d/b/.deck/root.patched/upper" "$parent/etc/old"
+mkdir -p "$d/b/.deck/root.build/upper/etc/ssl/private" "$d/b/.deck/root.build/upper/usr/lib" "$d/b/.deck/root.patched/upper/etc/ssl/private"
+echo parent-owned > "$parent/etc/old.conf"
+echo parent-child > "$parent/etc/old/a"
+# stage 1 makes a key and a library; stage 2 removes the key, removes a
+# parent file, re-creates a file stage 1 removed, and replaces a parent
+# directory opaquely
+echo 'FAKE-KEY-BYTES-THAT-MUST-NOT-SHIP' > "$d/b/.deck/root.build/upper/etc/ssl/private/fake.key"
+echo lib > "$d/b/.deck/root.build/upper/usr/lib/y.so"
+echo WHITEOUT > "$d/b/.deck/root.patched/upper/etc/ssl/private/fake.key.wh"
+echo WHITEOUT > "$d/b/.deck/root.patched/upper/etc/old.conf.wh"
+echo WHITEOUT > "$d/b/.deck/root.build/upper/etc/again.wh"
+echo again > "$d/b/.deck/root.patched/upper/etc/again"
+mkdir -p "$d/b/.deck/root.patched/upper/etc/old"
+echo new > "$d/b/.deck/root.patched/upper/etc/old/b"
+echo OPAQUE > "$d/b/.deck/root.patched/upper/etc/old/.opaque"
+# the final tree, as the mounted deck shows it
+mkdir -p "$d/b/root.patched/etc/ssl/private" "$d/b/root.patched/usr/lib" "$d/b/root.patched/etc/old"
+cp "$d/b/.deck/root.build/upper/usr/lib/y.so" "$d/b/root.patched/usr/lib/y.so"
+cp "$d/b/.deck/root.patched/upper/etc/again" "$d/b/root.patched/etc/again"
+cp "$d/b/.deck/root.patched/upper/etc/old/b" "$d/b/root.patched/etc/old/b"
+# stand-ins: a whiteout is NAME.wh, renamed to NAME when the lists are made
+for w in $(cd "$d/b/.deck" && find . -name '*.wh'); do mv "$d/b/.deck/$w" "$d/b/.deck/${w%.wh}"; done
+rm "$d/b/.deck/root.patched/upper/etc/old/.opaque"
+(
+    export LAYER_GETFATTR=$gf.unset
+    layer_is_whiteout() { [[ -f "$1" && "$(cat "$1")" == WHITEOUT ]]; }
+    layer_is_opaque() { [[ -d "$1" && "$1" == */root.patched/upper/./etc/old ]]; }
+    mapfile -t members < <(layer_tar_members delta "$d/b" "$parent" "$d/lists")
+    mapfile -t flags < <(layer_tar_flags 1700000000)
+    tar "${flags[@]}" -cf - "${members[@]}" | zstd -q -o "$d/delta.tar.zst"
+    printf '%s\n' "${members[@]}" > "$d/members.txt"
+)
+listing=$(zstd -dc "$d/delta.tar.zst" | tar -t | sort | tr '\n' ' ')
+if zstd -dc "$d/delta.tar.zst" | grep -aq 'FAKE-KEY-BYTES-THAT-MUST-NOT-SHIP'; then
+    fatal "delta: the bytes of a key the build created and removed are in the tarball"
+fi
+grep -q 'fake.key' <<<"$listing" && fatal "delta: the removed key is named in the tarball: $listing"
+assert_eq delta-members "$listing" "./ ./etc/ ./etc/again ./etc/old.conf ./etc/old/ ./etc/old/b ./etc/ssl/ ./etc/ssl/private/ ./usr/ ./usr/lib/ ./usr/lib/y.so "
+# the stage 2 whiteout of the key really was there, so it is the predicate
+# and the parent check that kept it out, not a missing file
+assert_eq delta-key-whiteout-seen "$(cat "$d/b/.deck/root.patched/upper/etc/ssl/private/fake.key")" WHITEOUT
+assert_eq delta-again-once "$(zstd -dc "$d/delta.tar.zst" | tar -t | grep -c '^./etc/again$')" 1
+assert_eq delta-old-is-whiteout "$(zstd -dc "$d/delta.tar.zst" | tar -xO ./etc/old.conf)" WHITEOUT
+assert_eq delta-opaque-from-upper "$(tr '\0' '\n' < "$d/lists/opaque.root.patched")" ./etc/old
+grep -q '^--null$' "$d/members.txt" || fatal "delta: the lists are not read NUL separated"
+expect_fail delta-no-final layer_delta_lists "$d/none" "$parent" "$d/l2"
+expect_fail delta-no-parent layer_delta_lists "$d/b" "$d/none" "$d/l2"
+mkdir -p "$d/c/root.patched"
+expect_fail delta-no-upper layer_delta_lists "$d/c" "$parent" "$d/l3"
+# the real predicates, on what an unprivileged run can make
+layer_is_whiteout /dev/null && fatal "/dev/null is not a whiteout"
+layer_is_whiteout "$parent/etc/old.conf" && fatal "a regular file is not a whiteout"
+if command -v getfattr >/dev/null; then
+    assert_eq opaque-real-unmarked "$(opaque_rc getfattr "$parent/etc/old")" 1
+fi
+layer_exists "$parent/etc/old.conf" || fatal "layer_exists misses a file"
+ln -s /nowhere "$d/dangling"
+layer_exists "$d/dangling" || fatal "layer_exists misses a dangling symlink"
+# the opaque mark is read or the build stops: a getfattr that is missing or
+# fails must not read as "not opaque", which brought a deleted parent file back
+assert_eq opaque-set "$(opaque_rc "$gf.set" "$parent/etc/old")" 0
+assert_eq opaque-unset "$(opaque_rc "$gf.unset" "$parent/etc/old")" 1
+assert_eq opaque-getfattr-fails "$(opaque_rc "$gf.fails" "$parent/etc/old")" 2
+assert_eq opaque-getfattr-missing "$(opaque_rc "$tmp/no-such-getfattr" "$parent/etc/old")" 2
+assert_eq opaque-file "$(opaque_rc "$gf.set" "$parent/etc/old.conf")" 1
+LAYER_GETFATTR=$tmp/no-such-getfattr expect_fail delta-no-getfattr layer_delta_lists "$d/b" "$parent" "$d/l4"
+mkdir -p "$d/e/root.patched/etc" "$d/e/.deck/root.build/upper/etc/old" "$d/e/.deck/root.patched/upper"
+LAYER_GETFATTR=$gf.fails expect_fail delta-getfattr-fails layer_delta_lists "$d/e" "$parent" "$d/l5"
+# no test follows a symlink: a stage 1 file under a directory stage 2
+# replaced with a link to the host, a stage 1 whiteout under a parent
+# directory that is a link, and an opaque directory over a parent link
+s=$d/s
+host=$d/host
+mkdir -p "$host/x" "$s/parent/etc" "$s/b/root.patched/opt" "$s/b/.deck/root.build/upper/opt/x" \
+    "$s/b/.deck/root.patched/upper/opt" "$s/b/.deck/root.build/upper/etc/plink" "$s/b/.deck/root.patched/upper/etc/olink"
+echo 'HOST-BYTES-THAT-MUST-NOT-SHIP' > "$host/x/secret"
+echo stage1 > "$s/b/.deck/root.build/upper/opt/x/secret"
+ln -s "$host/x" "$s/b/.deck/root.patched/upper/opt/x"
+ln -s "$host/x" "$s/b/root.patched/opt/x"
+ln -s "$host/x" "$s/parent/etc/plink"
+ln -s "$host" "$s/parent/etc/olink"
+echo WHITEOUT > "$s/b/.deck/root.build/upper/etc/plink/secret"
+mkdir -p "$s/b/root.patched/etc/olink"
+(
+    export LAYER_GETFATTR=$gf.unset
+    layer_is_whiteout() { [[ -f "$1" && "$(cat "$1")" == WHITEOUT ]]; }
+    layer_is_opaque() { [[ -d "$1" && ! -L "$1" && "$1" == */olink ]]; }
+    layer_delta_lists "$s/b" "$s/parent" "$s/lists"
+    mapfile -t members < <(layer_tar_members delta "$s/b" "$s/parent" "$s/lists")
+    mapfile -t flags < <(layer_tar_flags 1700000000)
+    tar "${flags[@]}" -cf - "${members[@]}" | zstd -q -o "$s/delta.tar.zst"
+)
+if zstd -dc "$s/delta.tar.zst" | grep -aq 'HOST-BYTES-THAT-MUST-NOT-SHIP'; then
+    fatal "delta: a file of the build host reached through a symlink is in the tarball"
+fi
+grep -qz '^./opt/x/secret$' "$s/lists/present" && fatal "delta: a file under a replaced directory is listed"
+assert_eq symlink-no-whiteout "$(tr '\0' '\n' < "$s/lists/whiteouts.root.build")" ""
+assert_eq symlink-no-opaque "$(tr '\0' '\n' < "$s/lists/opaque.root.patched")" ""
+grep -qz '^./etc/olink$' "$s/lists/present" || fatal "delta: a directory over a parent link is not present"
+layer_real_dir_in "$s/b/root.patched" ./opt/x && fatal "layer_real_dir_in follows a symlink"
+layer_real_dir_in "$s/b/root.patched" . || fatal "layer_real_dir_in misses the root"
+layer_exists_in "$s/b/root.patched" ./opt/x/secret && fatal "layer_exists_in follows a symlinked directory"
+layer_exists_in "$s/b/root.patched" ./opt/x || fatal "layer_exists_in misses a symlink"
+layer_exists_in "$s/b/root.patched" ./opt || fatal "layer_exists_in misses a top directory"
+layer_exists_in "$s/b/root.patched" . || fatal "layer_exists_in misses the root"
 
 info "10b: layer_audit_packages"
 audit_root=$tmp/auditfs
@@ -684,7 +826,7 @@ assert_eq core-size "$(layer_manifest_get "$L/core.manifest" size)" "$(stat -c %
 assert_eq core-sha256-file "$(cut -d ' ' -f 1 "$L/core.tar.zst.sha256")" \
     "$(layer_manifest_get "$L/core.manifest" sha256)"
 assert_eq core-members "$(zstd -dc "$L/core.tar.zst" | tar -t | sort | tr '\n' ' ')" \
-    "./ ./bin/ ./bin/bash ./etc/ ./etc/hostname ./etc/machine-id ./var/ ./var/lib/ ./var/lib/dbus/ ./var/lib/dbus/machine-id "
+    "./ ./bin/ ./bin/bash ./etc/ ./etc/hostname ./etc/machine-id ./etc/x.conf ./usr/ ./usr/lib/ ./usr/lib/x.so ./var/ ./var/cache/ ./var/cache/apt/ ./var/cache/apt/archives/ ./var/lib/ ./var/lib/dbus/ ./var/lib/dbus/machine-id "
 # the build wrote an id; the layer, and the rootfs its children start from,
 # carry an empty file and a D-Bus link to it
 assert_eq core-machine-id "$(zstd -dc "$L/core.tar.zst" | tar -xO ./etc/machine-id | wc -c)" 0
