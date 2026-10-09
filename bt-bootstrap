@@ -100,6 +100,14 @@ source "$BT_CONFIG/common.cfg"
 O=$BT_BUILDS/bootstrap
 mkdir -p $O
 
+# A Keel container never builds an initrd: the initramfs tooling is part of
+# the boot set, which lives in the per-appliance boot layer the ISO is made
+# from (handbook decision 0052). Upstream's default EXTRA_PKGS pulls
+# initramfs-tools (and dracut-install, klibc, linux-base with it) into the
+# bootstrap, so every layer inherits it and keel assemble refuses the
+# template. Same list as upstream, without initramfs-tools.
+export EXTRA_PKGS="gpg,gpg-agent,ca-certificates,lsb-release,zstd"
+
 if [[ -z "$RELEASE" ]]; then
     info "RELEASE not set, determining from system."
     distrib_ID=$(lsb_release -si)
