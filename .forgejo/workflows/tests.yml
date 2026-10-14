@@ -1,0 +1,20 @@
+# Forgejo copy of .github/workflows/tests.yml (decision 0056): the same
+# jobs, with a runs-on line on each call of a reusable workflow,
+# because Forgejo runs a called workflow on the runner of the caller.
+# Coverage gate: 99 percent, the number tests/coverage.sh measures on this
+# branch (COVERAGE.md, "measured baseline"). Only ever raised (decision 0006).
+# The check is "tests / coverage".
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [19.x]
+jobs:
+  tests:
+    runs-on: keel-host
+    uses: keel-linux/.github/.github/workflows/test-shell.yml@main
+    with:
+      threshold: 99
+      # tests/machine-id makes small ISOs, as fab does; bt-layer reads
+      # overlayfs opaque marks with getfattr
+      apt-packages: squashfs-tools xorriso attr
