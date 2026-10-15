@@ -17,14 +17,16 @@
 #     blank line, missing field, bad Type, bad Version, short sha512, bad
 #     Location extension, no continuation); aplinfo_assemble (one, many,
 #     none, invalid); aplinfo_gzip (ok, missing); aplinfo_sign (unsigned
-#     warning removes stale .asc, signed, bad key, missing file);
+#     warning removes stale .asc, signed, bad key, missing file, 2 keys
+#     with each key alone verifying, 2 keys with a bad one);
 #     aplinfo_parse_args (help, defaults, url, output, short options, no
 #     template, option without value, unknown option).
 #   bt-aplinfo: --help; usage error; missing config; missing BT_PRODUCTS;
 #     bad template name; missing template; stale sidecar; no product dir;
 #     no description; bad base URL; unsigned run with two templates, default
 #     output, changelog mismatch warning, no changelog warning; signed run
-#     with -u and -o, verified with sqv or gpg; parse check of the index.
+#     with -u and -o, verified with sqv or gpg; signed run with
+#     BT_GPGKEY_ALSO; parse check of the index.
 
 # pipefail as the scripts under test set it: a library function that
 # inherits a pipeline's status must fail here and not in production.
@@ -244,6 +246,24 @@ else
 fi
 expect_fail sign-badkey aplinfo_sign "$index" DEADBEEFDEADBEEF
 expect_fail sign-missing aplinfo_sign "$tmp/nothere.dat" "$keyid"
+# BT_GPGKEY_ALSO: a second key adds its signature to the same .asc
+# (decision 0055), and each key alone verifies it, as sqv on Proxmox does.
+gpg --batch --quiet --passphrase '' --quick-generate-key 'Keel Images Test <images@[2001:db8::1]>' ed25519 sign 0 2>/dev/null
+key2=$(gpg --list-keys --with-colons 'images@[2001:db8::1]' 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')
+[[ -n "$key2" ]] || fatal "no second throwaway key generated"
+gpg --armor --export "$key2" > "$tmp/pub2.asc" 2>/dev/null
+assert_eq sign-two "$(aplinfo_sign "$index" "$keyid" "$key2")" "$index.asc"
+assert_eq sign-two-count "$(gpg --list-packets "$index.asc" 2>/dev/null | grep -c '^:signature packet')" 2
+for ring in pub.asc pub2.asc; do
+    gpg --batch --quiet --yes --dearmor --output "$tmp/ring.gpg" "$tmp/$ring" 2>/dev/null
+    # gpgv exits 2 here, for the signature whose key it does not have
+    one=$(gpgv --status-fd 1 --keyring "$tmp/ring.gpg" "$index.asc" "$index" 2>/dev/null || true)
+    grep -q '^\[GNUPG:\] GOODSIG' <<<"$one" || fatal "$ring alone finds no good signature"
+    if command -v sqv >/dev/null; then
+        sqv --keyring "$tmp/$ring" "$index.asc" "$index" >/dev/null || fatal "sqv with $ring alone rejects it"
+    fi
+done
+expect_fail sign-two-badkey aplinfo_sign "$index" "$keyid" DEADBEEFDEADBEEF
 
 info "13: aplinfo_parse_args"
 aplinfo_parse_args --help
@@ -340,6 +360,11 @@ else
     gpg --verify "$index.asc" "$index" 2>/dev/null || fatal "gpg rejects the index signature"
 fi
 cmp -s "$index" <(gzip -dc "$index.gz") || fatal "the .gz does not unpack to the index"
+
+info "17b: bt-aplinfo with BT_GPGKEY_ALSO"
+out=$(BT_GPGKEY=$keyid BT_GPGKEY_ALSO=$key2 "$sbt/bt-aplinfo" -u "http://[2001:db8::1]/pve" -o "$tmp/out2" "$core" "$lamp")
+grep -q "INFO.*signing $tmp/out2/aplinfo.dat with $keyid $key2" <<<"$out" || fatal "the second key was not reported: $out"
+assert_eq run-two-count "$(gpg --list-packets "$tmp/out2/aplinfo.dat.asc" 2>/dev/null | grep -c '^:signature packet')" 2
 
 info "18: parse check, as pveam reads the file"
 # Records split on blank lines; every key pveam reads present in every

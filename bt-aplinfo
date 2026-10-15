@@ -44,6 +44,10 @@ Environment::
     BT_GPGKEY           - when set, aplinfo.dat.asc is written with this key;
                           when unset a warning is printed, since pveam
                           refuses an index without a signature
+    BT_GPGKEY_ALSO      - more keys, split by spaces, that each add a
+                          signature to aplinfo.dat.asc when BT_GPGKEY is set
+                          (Keel Linux decision 0055: main and images both
+                          sign until every verifier trusts the images key)
     BT_DEBUG            - verbose output
 
 Output, in DIR::
@@ -114,5 +118,6 @@ aplinfo_assemble "${record_files[@]}" > "$index" || fatal "cannot assemble $inde
 aplinfo_gzip "$index" || fatal "cannot gzip $index"
 info "wrote $index and $index.gz (${#record_files[@]} records)"
 
-[[ -z "$BT_GPGKEY" ]] || info "signing $index with $BT_GPGKEY"
-aplinfo_sign "$index" "$BT_GPGKEY" || fatal "cannot sign $index"
+[[ -z "$BT_GPGKEY" ]] || info "signing $index with $BT_GPGKEY${BT_GPGKEY_ALSO:+ $BT_GPGKEY_ALSO}"
+# shellcheck disable=SC2086 # a list of keys, split on purpose
+aplinfo_sign "$index" "$BT_GPGKEY" $BT_GPGKEY_ALSO || fatal "cannot sign $index"
