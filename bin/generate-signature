@@ -46,6 +46,11 @@ Environment::
 
     BT_GPGKEY       - key that signs the hash file (id, fingerprint or uid).
                       When unset nothing is signed and no key is named.
+    BT_GPGKEY_ALSO  - more keys, split by spaces, that each add a signature
+                      to the hash file when BT_GPGKEY is set. The hash file
+                      names them, and each signature is verified. Keel Linux
+                      decision 0055: main and images both sign until every
+                      verifier trusts the images key.
     BT_SIGN_KEY_EMAIL
                     - address of the signing key to quote in the hash file.
                       Defaults to the address in the key's first user id.
@@ -182,15 +187,31 @@ GPG_LISTKEYS=$("${GPG_KEYRING[@]}" --list-keys --with-fingerprint "$KEY_EMAIL" |
 UID_INFO=$KEY_UID
 [[ -z "$upstream" ]] || UID_INFO=$(sig_uid_info_compat "$pub_colons" "$KEY_EMAIL")
 
+# The keys that add a signature, each named in the text by fingerprint and
+# user id.
+ALL_FPRS=$KEY_FPR
+ALSO_LINES=()
+SIGNERS=(-u "$BT_GPGKEY")
+for also in $BT_GPGKEY_ALSO; do
+    also_colons=$(gpg --with-colons --fingerprint --list-keys "$also" 2>/dev/null) || fatal "BT_GPGKEY_ALSO key '$also' is not in the keyring"
+    { also_fpr=$(sig_colons_fpr "$also_colons") && also_uid=$(sig_colons_uid "$also_colons"); } || fatal "cannot name the BT_GPGKEY_ALSO key '$also' by fingerprint and user id"
+    ALL_FPRS+=" $also_fpr"
+    ALSO_LINES+=("$also_fpr $also_uid")
+    SIGNERS+=(-u "$also")
+done
+
 info "writing hash file"
 sig_hash_text "$filename" "$SHA256SUM" "$SHA512SUM" "$KEY_EMAIL" "$KEY_FPR" "$UID_INFO" "$GPG_LISTKEYS" "$KEY_ALGO" "$KEY_URL" > "$filepath.hash"
+[[ ${#ALSO_LINES[@]} -eq 0 ]] || sig_also_text "${ALSO_LINES[@]}" >> "$filepath.hash"
 hash_written=yes
 
-info "signing $filepath.hash with $KEY_FPR"
-gpg -u "$BT_GPGKEY" --yes --output "$filepath.hash.asc" --clearsign "$filepath.hash" || fatal "signing $filepath.hash with $BT_GPGKEY failed"
+info "signing $filepath.hash with $ALL_FPRS"
+gpg "${SIGNERS[@]}" --yes --output "$filepath.hash.asc" --clearsign "$filepath.hash" || fatal "signing $filepath.hash with $BT_GPGKEY $BT_GPGKEY_ALSO failed"
 mv "$filepath.hash.asc" "$filepath.hash"
 
 status=$(gpg --status-fd 1 --verify "$filepath.hash" 2>/dev/null) || fatal "$filepath.hash does not verify"
-SIGNED_BY=$(sig_validsig_primary "$status") || fatal "no good signature on $filepath.hash"
-[[ "$SIGNED_BY" == "$KEY_FPR" ]] || fatal "$filepath.hash is signed by $SIGNED_BY, not by $KEY_FPR"
-info "$filepath.hash is signed by $KEY_FPR ($KEY_EMAIL) and verifies"
+SIGNED_BY=$(sig_validsig_primaries "$status" | tr '\n' ' ') || fatal "no good signature on $filepath.hash"
+for fpr in $ALL_FPRS; do
+    [[ " $SIGNED_BY " == *" $fpr "* ]] || fatal "$filepath.hash is signed by $SIGNED_BY, not by $fpr"
+done
+info "$filepath.hash is signed by $ALL_FPRS ($KEY_EMAIL) and verifies"

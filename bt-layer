@@ -51,6 +51,8 @@ Environment::
                           next to the tarball, signed with that key and naming
                           it; when unset a warning is printed and no hash file
                           is written
+    BT_GPGKEY_ALSO      - more keys, split by spaces, that each add a
+                          signature to that hash file (generate-signature)
     FAB_PATH            - fab tree (common/, altstraps/)
     RELEASE, FAB_ARCH   - default to the host release and architecture
     BT_DEBUG            - verbose output

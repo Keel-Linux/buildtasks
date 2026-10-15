@@ -145,6 +145,29 @@ sig_validsig_primary() {
     echo "$primary"
 }
 
+# The primary key fingerprint of each good signature, one a line, from gpg
+# --status-fd output of a file that several keys signed.
+sig_validsig_primaries() {
+    local primaries
+    primaries=$(awk '$2 == "VALIDSIG" { print $NF }' <<<"$1")
+    [[ -n "$primaries" ]] || { sig_error "no VALIDSIG line in the gpg status output"; return 1; }
+    echo "$primaries"
+}
+
+# The paragraph a hash file gets when BT_GPGKEY_ALSO adds signatures. Each
+# argument is "<fingerprint> <user id>". It goes inside the signed text, so
+# the file names every key that signs it.
+sig_also_text() {
+    local line
+    echo
+    echo "   This file also carries a signature by each key below. A good signature by"
+    echo "   any one of them is enough (Keel Linux decision 0055):"
+    echo
+    for line in "$@"; do
+        echo "      $line"
+    done
+}
+
 sig_digest_line() {
     printf '%s  %s\n' "$1" "$2"
 }

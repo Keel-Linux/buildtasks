@@ -325,6 +325,32 @@ out=$(BT_GPGKEY=$PUBONLY_FPR "$GS" "$f" 2>&1 || true)
 grep -q "removed the unsigned $f.hash" <<<"$out" || fatal "an unsigned hash file was left: $out"
 assert_missing "$f.hash"
 
+info "11b: BT_GPGKEY_ALSO, a second signature that the text names"
+newkey "Keel Linux Images Test Key <images@test.invalid>" ed25519
+IMAGES_FPR=$(keyfpr images@test.invalid)
+rm -f "$f.hash"
+out=$(BT_GPGKEY=$KEEL_FPR BT_GPGKEY_ALSO=$IMAGES_FPR "$GS" "$f")
+grep -q "is signed by $KEEL_FPR $IMAGES_FPR" <<<"$out" || fatal "both signatures were not verified: $out"
+assert_grep hash-also "also carries a signature by each key below" "$f.hash"
+assert_grep hash-also-fpr "$IMAGES_FPR Keel Linux Images Test Key <images@test.invalid>" "$f.hash"
+status=$(gpg --status-fd 1 --verify "$f.hash" 2>/dev/null)
+assert_eq also-validsig "$(grep -c '^\[GNUPG:\] VALIDSIG' <<<"$status")" 2
+for fpr in "$KEEL_FPR" "$IMAGES_FPR"; do
+    gpg --export "$fpr" > "$tmp/one.gpg" 2>/dev/null
+    # gpgv exits 2 here, for the signature whose key it does not have
+    one=$(gpgv --status-fd 1 --keyring "$tmp/one.gpg" "$f.hash" 2>/dev/null || true)
+    grep -q "^\[GNUPG:\] VALIDSIG .* $fpr$" <<<"$one" || fatal "$fpr alone finds no good signature"
+done
+rm -f "$f.hash"
+expect_fail also-unknown env BT_GPGKEY="$KEEL_FPR" BT_GPGKEY_ALSO=0000000000000000 "$GS" "$f"
+assert_missing "$f.hash"
+out=$(BT_GPGKEY=$KEEL_FPR BT_GPGKEY_ALSO=$PUBONLY_FPR "$GS" "$f" 2>&1 || true)
+grep -q "removed the unsigned $f.hash" <<<"$out" || fatal "an extra key that cannot sign left a hash file: $out"
+assert_missing "$f.hash"
+assert_eq validsig-primaries "$(sig_validsig_primaries "$status" | tr '\n' ' ')" "$KEEL_FPR $IMAGES_FPR "
+expect_fail validsig-primaries-none sig_validsig_primaries "nothing"
+assert_eq also-text "$(sig_also_text "$KEEL_FPR Somebody")" "$(printf '\n   This file also carries a signature by each key below. A good signature by\n   any one of them is enough (Keel Linux decision 0055):\n\n      %s Somebody' "$KEEL_FPR")"
+
 info "12: an upstream artifact with the upstream key, byte for byte"
 u=$tmp/work/bootstrap-trixie-amd64.tar.gz
 echo "an upstream bootstrap" > "$u"

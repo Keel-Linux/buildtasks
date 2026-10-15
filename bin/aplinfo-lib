@@ -288,10 +288,14 @@ aplinfo_gzip() {
 
 # Detached armored signature <file>.asc over the uncompressed index, which
 # is what pveam verifies with sqv. Without a key id nothing is signed, a
-# stale .asc is removed and the caller is told on stdout.
+# stale .asc is removed and the caller is told on stdout. Each key after
+# the first adds its signature to the same .asc, and sqv with any one of
+# the keys accepts the file (Keel Linux decision 0055).
 aplinfo_sign() {
     local file=$1
     local key=$2
+    shift 2
+    local users=(--local-user "$key") also
     if [[ ! -f "$file" ]]; then
         aplinfo_error "cannot sign, file not found: $file"
         return 1
@@ -301,9 +305,12 @@ aplinfo_sign() {
         echo "WARNING [aplinfo-lib]: BT_GPGKEY not set, $file.asc not written; pveam refuses an index without a signature"
         return 0
     fi
-    if ! gpg --batch --yes --local-user "$key" --armor --detach-sign \
+    for also in "$@"; do
+        users+=(--local-user "$also")
+    done
+    if ! gpg --batch --yes "${users[@]}" --armor --detach-sign \
             --output "$file.asc" "$file"; then
-        aplinfo_error "gpg failed to sign $file with key $key"
+        aplinfo_error "gpg failed to sign $file with key $key $*"
         return 1
     fi
     echo "$file.asc"
