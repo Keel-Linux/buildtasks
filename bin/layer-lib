@@ -857,6 +857,30 @@ layer_parent_resolve() {
     layer_manifest_get "$manifest" sha256
 }
 
+# layer_boot_hostname ROOTFS: prints the name of the machine in
+# ROOTFS/etc/hostname, the first line. The boot layer of an appliance is
+# built from products/boot, and common's turnkey.mk names the machine after
+# the directory of the product: an ISO installed a machine named "boot"
+# (2026-11-06). The rootfs of the appliance's layer carries the name that
+# seal-hostname of common gave it, the appliance name, so the boot layer
+# takes that one. Fails when the file is missing or empty, or when the name
+# is not one label of a host name (RFC 1123: letters, digits and hyphens,
+# 1 to 63 characters, no hyphen first or last).
+layer_boot_hostname() {
+    local file=$1/etc/hostname
+    local name=
+    [[ ! -s "$file" ]] || read -r name < "$file" || true
+    if [[ -z "$name" ]]; then
+        layer_error "$file is missing or empty: the parent layer names no machine"
+        return 1
+    fi
+    if [[ ! "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+        layer_error "'$name' of $file is not a host name"
+        return 1
+    fi
+    echo "$name"
+}
+
 # layer_parse_args ARGS...: sets LAYER_NAME, LAYER_PARENT, LAYER_USE_EXISTING,
 # LAYER_BOOT and LAYER_HELP, or LAYER_ERROR and returns 1. With --boot the
 # name given is the appliance: the layer is APPLIANCE-boot and its parent is

@@ -8,7 +8,21 @@
 # turnkey.mk puts turnkey.d first: bt-layer applies only what the parent
 # did not, so this layer runs keel-boot and the turnkey.d steps every
 # layer needs.
+#
+# The name of the machine: bt-layer --boot gives HOSTNAME, the name of the
+# appliance's rootfs, and turnkey.d/hostname writes it and "127.0.1.1
+# HOSTNAME" again. This product has no changelog, so turnkey.mk does not
+# seal the name; the hook below does, with the seal-hostname of common the
+# appliance's layer used: the appliance name of /etc/keel_version, which
+# the boot layer inherits, and no 127.0.1.1 line. Without it an ISO
+# installed a machine named "boot" (2026-11-06). As turnkey.mk asks, the
+# first line of the hook is empty, and turnkey.mk adds its own after it.
 COMMON_OVERLAYS = keel-boot
 COMMON_CONF = keel-boot
+
+define root.patched/post
+
+	$(FAB_PATH)/common/mk/turnkey/seal-hostname $O/root.patched
+endef
 
 include $(FAB_PATH)/common/mk/turnkey.mk

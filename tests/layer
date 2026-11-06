@@ -45,6 +45,7 @@
 #     no key list);
 #     layer_hash_size (ok, missing); layer_write_sha256; layer_umount_targets
 #     (none, mounted); layer_parent_resolve (ok, no rootfs, no manifest);
+#     layer_boot_hostname (a name, missing, empty, not a host name);
 #     layer_parse_args (help, name, parent, use-existing, no name, two
 #     names, unknown option, parent without value, self parent, --boot,
 #     --boot with --parent).
@@ -59,8 +60,10 @@
 #     without a debug target; failing make removes the altstrap; TERM default;
 #     a rootfs layer with a unit; a child that composes the same unit; a child
 #     that adds one; a child with no unit of its own; --boot (the boot layer
-#     on the appliance's, its product missing, with --parent; products/boot's
-#     conf and overlays); a unit pinned to another
+#     on the appliance's, named as the appliance's rootfs is, refused when
+#     that rootfs has no name, its product missing, with --parent;
+#     products/boot's conf and overlays, and its seal of the name); a unit
+#     pinned to another
 #     version than the parent applied; a unit whose conf fab would skip; a
 #     parent manifest written before the units field existed.
 
@@ -169,6 +172,7 @@ build/stamps/root.patched:
 	echo "\$(COMMON_CONF)" > build/conf.used
 	echo "\$(UNITS)" > build/units.used
 	echo "\$\$TERM" > build/term.used
+	echo "\$(HOSTNAME)" > build/hostname.used
 	readlink "\$(FAB_PATH)/altstraps/trixie-amd64.core" > build/altstrap.used || true
 	touch build/stamps/root.patched
 EOF
@@ -747,6 +751,27 @@ layer_manifest_render layer core sha256 deadbeef > "$layers/core.manifest"
 assert_eq parent-sha "$(layer_parent_resolve "$layers" core)" deadbeef
 rm -rf "$layers"
 
+info "14a: layer_boot_hostname"
+root=$tmp/hostroot
+mkdir -p "$root/etc"
+printf 'wordpress\nsecond line\n' > "$root/etc/hostname"
+assert_eq boot-hostname-name "$(layer_boot_hostname "$root")" wordpress
+printf 'keel-web1\n' > "$root/etc/hostname"
+assert_eq boot-hostname-hyphen "$(layer_boot_hostname "$root")" keel-web1
+for bad in "" "boot camp" "-web" "web-" "web.example.org" "we/b" \
+        "$(printf 'a%.0s' {1..64})"; do
+    printf '%s\n' "$bad" > "$root/etc/hostname"
+    expect_fail "boot-hostname-bad '$bad'" layer_boot_hostname "$root"
+done
+rm "$root/etc/hostname"
+expect_fail boot-hostname-missing layer_boot_hostname "$root"
+assert_eq boot-hostname-error "$(layer_boot_hostname "$root" 2>&1)" \
+    "ERROR [layer-lib]: $root/etc/hostname is missing or empty: the parent layer names no machine"
+printf 'a b\n' > "$root/etc/hostname"
+assert_eq boot-hostname-error-bad "$(layer_boot_hostname "$root" 2>&1)" \
+    "ERROR [layer-lib]: 'a b' of $root/etc/hostname is not a host name"
+rm -rf "$root"
+
 info "15: layer_parse_args"
 layer_parse_args --help
 assert_eq parse-help "$LAYER_HELP" yes
@@ -992,6 +1017,18 @@ assert_eq boot-build-conf "$(layer_manifest_get "$L/core-boot.manifest" build_co
 assert_eq boot-build-overlays "$(layer_manifest_get "$L/core-boot.manifest" build_overlays)" \
     "turnkey.d/tkl-bashlib turnkey.d/systemd-chroot keel-boot"
 assert_eq boot-altstrap-used "$(cat "$tmp/products/bootprod/build/altstrap.used")" "$L/core.rootfs"
+# the boot layer is named as the appliance's sealed rootfs is, never after
+# the directory of the boot product ("boot", 2026-11-06)
+assert_eq boot-hostname "$(cat "$tmp/products/bootprod/build/hostname.used")" hostname
+printf 'wordpress\n' > "$L/core.rootfs/etc/hostname"
+out=$(BT_BOOT_PRODUCT=$tmp/products/bootprod "$sbt/bt-layer" --boot core)
+assert_eq boot-hostname-app "$(cat "$tmp/products/bootprod/build/hostname.used")" wordpress
+grep -q 'INFO.*the boot layer of core is named wordpress' <<<"$out" \
+    || fatal "bt-layer --boot did not say the name it gives"
+assert_eq child-hostname-unset "$(cat "$tmp/products/app3/build/hostname.used")" ""
+mv "$L/core.rootfs/etc/hostname" "$tmp/core.hostname"
+expect_fail boot-no-hostname env BT_BOOT_PRODUCT="$tmp/products/bootprod" "$sbt/bt-layer" --boot core
+mv "$tmp/core.hostname" "$L/core.rootfs/etc/hostname"
 expect_fail boot-with-parent "$sbt/bt-layer" --boot core --parent lamp
 
 info "23a: products/boot asks for keel-boot on top of turnkey.d"
@@ -1009,6 +1046,28 @@ assert_eq boot-product-conf "$(FAB_PATH=$tmp/fabstub layer_make_var "$tmp/bootco
 assert_eq boot-product-overlays "$(FAB_PATH=$tmp/fabstub layer_make_var "$tmp/bootcopy" COMMON_OVERLAYS)" \
     "turnkey.d keel-boot"
 grep -qx '#include <keel-boot>' "$tmp/bootcopy/plan/main" || fatal "products/boot does not resolve plans/keel-boot"
+
+info "23b: products/boot seals the name of the machine, as an appliance does"
+# turnkey.d/hostname writes HOSTNAME and "127.0.1.1 HOSTNAME" again in this
+# layer; common's seal-hostname leaves the appliance name and no such line,
+# as it does for the appliance's own layer
+cat >> "$tmp/fabstub/common/mk/turnkey.mk" <<'MK'
+define _root.patched/post
+
+	true
+endef
+root.patched/post += $(_root.patched/post)
+post:
+	$(root.patched/post)
+MK
+mkdir -p "$tmp/fabstub/common/mk/turnkey"
+printf '#!/bin/sh\necho "$@" > "%s"\n' "$tmp/seal.args" > "$tmp/fabstub/common/mk/turnkey/seal-hostname"
+chmod +x "$tmp/fabstub/common/mk/turnkey/seal-hostname"
+(cd "$tmp/bootcopy" && make -s post FAB_PATH="$tmp/fabstub" O=build) >/dev/null \
+    || fatal "the root.patched/post hook of products/boot failed"
+assert_eq boot-seal-hostname "$(cat "$tmp/seal.args")" build/root.patched
+printf '#!/bin/sh\nexit 1\n' > "$tmp/fabstub/common/mk/turnkey/seal-hostname"
+expect_fail boot-seal-fails make -C "$tmp/bootcopy" -s post FAB_PATH="$tmp/fabstub" O=build
 
 echo
 info "all tests passed"

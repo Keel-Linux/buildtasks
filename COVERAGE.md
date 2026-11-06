@@ -370,6 +370,21 @@ once. All five suites now set it. One assertion had to change with it:
 `tests/signature` piped `generate-signature --help` into `grep`, and usage
 exits non-zero by convention, so the output is captured first.
 
+## 2026-11-06: the name of the boot layer
+
+An ISO installed a machine named "boot", the directory of `products/boot`
+(commissioning test of the WordPress ISO on BR1). `layer_boot_hostname`
+reads the name of the appliance's sealed rootfs, `bt-layer --boot` gives it
+to the build as `HOSTNAME`, and the `root.patched/post` hook of
+`products/boot/Makefile` runs common's `seal-hostname`. `tests/layer` covers
+a name, a hyphenated name, each kind of bad name, a missing file, the error
+texts, the `HOSTNAME` of a boot build and of a child build (none), a boot
+build refused when the rootfs has no name, and the hook (it runs
+`seal-hostname` on `build/root.patched`, and its failure fails the build).
+Coverage: layer-lib 482 of 484 (99.59 percent), bt-layer 120 of 121 (99.17
+percent); the lines it does not count are continuation lines that were
+there before. The gate stays at 99.
+
 ## Not measured
 
 `tests/appname-version` exercises the inherited `bin/appname-version` by hand
