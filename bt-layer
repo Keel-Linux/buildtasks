@@ -164,6 +164,14 @@ if [[ -n "$parent" ]]; then
     info "units for this layer: $build_units (of $full_units)"
 fi
 
+if [[ -n "$LAYER_BOOT" ]]; then
+    # the machine an ISO installs is named as the appliance, not as the
+    # directory of the boot product
+    boot_hostname=$(layer_boot_hostname "$layers_dir/$parent.rootfs") || fatal "cannot name the boot layer of $parent"
+    make_args+=("HOSTNAME=$boot_hostname")
+    info "the boot layer of $parent is named $boot_hostname"
+fi
+
 altstrap=
 cleanup() {
     if [[ -n "$altstrap" ]]; then
