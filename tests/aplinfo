@@ -176,7 +176,11 @@ assert_eq render-package "$(aplinfo_record_field "$record" Package)" keel-core
 assert_eq render-type "$(aplinfo_record_field "$record" Type)" lxc
 assert_eq render-os "$(aplinfo_record_field "$record" OS)" debian-13
 assert_eq render-section "$(aplinfo_record_field "$record" Section)" keellinux
-assert_eq render-infopage "$(aplinfo_record_field "$record" Infopage)" https://keellinux.org/core
+# the page of an application is https://keellinux.org/apps/NAME/ (decision 0077)
+assert_eq render-infopage "$(aplinfo_record_field "$record" Infopage)" https://keellinux.org/apps/core
+assert_eq render-infopage-base "$(APLINFO_INFOPAGE_BASE=https://example.org/pages/ bash -c \
+    '. "$0"; aplinfo_record_render core 19.1-1 debian-13 amd64 https://example.org/a.tar.zst x "Keel Core" long' \
+    "$BT/bin/aplinfo-lib" | sed -n 's/^Infopage: //p')" https://example.org/pages/core
 assert_eq render-manage "$(aplinfo_record_field "$record" ManageUrl)" "http://__IPADDRESS__/"
 assert_eq render-continuation "$(tail -n 1 "$record")" " Keel Core - Debian 13 with batteries included"
 assert_eq render-lines "$(wc -l < "$record")" 12
