@@ -45,7 +45,7 @@ One record per template, fields in the order TurnKey publishes them:
     Section: keellinux
     Architecture: amd64
     Location: https://releases.keellinux.org/pve/debian-13-keel-core_19.1-1_amd64.tar.zst
-    Infopage: https://keellinux.org/core
+    Infopage: https://keellinux.org/apps/core
     ManageUrl: http://__IPADDRESS__/
     sha512sum: 3f2a...128 hex characters
     Description: Keel Core
@@ -57,8 +57,9 @@ Where each value comes from:
   name (below).
 - `Location`: the base URL (`--url`, default
   `https://releases.keellinux.org/pve/`) plus the template file name.
-- `Infopage`: `https://keellinux.org/<app>` (`APLINFO_INFOPAGE_BASE` in the
-  environment overrides the base).
+- `Infopage`: `https://keellinux.org/apps/<app>`, the documentation page of
+  the application (decision 0077). `APLINFO_INFOPAGE_BASE` in the environment
+  overrides the base.
 - `sha512sum`: computed from the template; when a `.sha512` sidecar exists it
   must agree, so a template rebuilt without its sidecar is caught.
 - `Description` and its continuation line: from the product directory

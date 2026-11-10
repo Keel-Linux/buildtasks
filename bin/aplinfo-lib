@@ -24,7 +24,8 @@ APLINFO_SECTION=keellinux
 APLINFO_TYPE=lxc
 APLINFO_PACKAGE_PREFIX=keel-
 APLINFO_MANAGE_URL="http://__IPADDRESS__/"
-APLINFO_INFOPAGE_BASE=${APLINFO_INFOPAGE_BASE:-https://keellinux.org}
+# The page of an application is https://keellinux.org/apps/NAME/ (decision 0077).
+APLINFO_INFOPAGE_BASE=${APLINFO_INFOPAGE_BASE:-https://keellinux.org/apps}
 APLINFO_DEFAULT_URL=https://releases.keellinux.org/pve/
 APLINFO_FILE=aplinfo.dat
 
